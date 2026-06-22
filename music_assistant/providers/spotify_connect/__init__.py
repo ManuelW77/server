@@ -19,6 +19,7 @@ import os
 import time
 from collections.abc import AsyncGenerator
 from contextlib import suppress
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from music_assistant_models.enums import (
@@ -627,7 +628,7 @@ class SpotifyConnectProvider(PluginProvider):
         :param source_ip: Local address of the player-facing interface, or None to
             advertise the Spotify Connect device on all interfaces.
         """
-        os.makedirs(self.cache_dir, exist_ok=True)
+        Path(self.cache_dir).mkdir(parents=True, exist_ok=True)
         initial_volume = 50
         if self._default_player_id != PLAYER_ID_AUTO:
             # the resolved logical (0-100) volume matches the Spotify volume scale;
