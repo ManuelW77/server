@@ -304,7 +304,8 @@ class DeezerMediaManager:
         need_audiobooks = MediaType.AUDIOBOOK in media_types
 
         # Try with full limit first; on complexity error, retry with reduced limits.
-        attempts = [limit, max(limit // 2, 5), 5]
+        # dict.fromkeys dedupes while preserving order (e.g. limit=5 -> one attempt)
+        attempts = list(dict.fromkeys([limit, max(limit // 2, 5), 5]))
         result = None
         for idx, attempt_limit in enumerate(attempts):
             try:
@@ -496,7 +497,10 @@ class DeezerMediaManager:
     @use_cache(3600 * 24 * 30, allow_expired_cache=True)
     async def get_podcast(self, prov_podcast_id: str) -> Podcast:
         """Get full podcast details by id."""
-        result = await self.provider.gql_client.get_podcast(podcast_id=prov_podcast_id)
+        # episodes_first=0: only rawEpisodes is used here, skip the episode payloads
+        result = await self.provider.gql_client.get_podcast(
+            podcast_id=prov_podcast_id, episodes_first=0
+        )
         if result is None:
             raise MediaNotFoundError(f"Podcast {prov_podcast_id} not found on Deezer")
         podcast = parse_podcast(self.provider, result)
@@ -551,8 +555,20 @@ class DeezerMediaManager:
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         """Get all tracks in an album."""
         if prov_album_id.startswith(PERSONAL_ALBUM_PREFIX):
-            # Personal album has no real Deezer album page
-            return []
+            # Personal album has no real Deezer album page - collect the
+            # uploads that share the anchor song's album title instead.
+            song_id = prov_album_id.removeprefix(PERSONAL_ALBUM_PREFIX)
+            personal_songs = await self._get_personal_songs()
+            anchor = next((s for s in personal_songs if str(s["SNG_ID"]) == song_id), None)
+            if anchor is None:
+                return []
+            album_title = anchor.get("ALB_TITLE", "")
+            return [
+                parse_gw_track(self.provider, song, position=idx)
+                for idx, song in enumerate(
+                    (s for s in personal_songs if s.get("ALB_TITLE", "") == album_title), 1
+                )
+            ]
         result = await self.provider.gql_client.get_album(album_id=prov_album_id)
         if result is None:
             return []
@@ -799,7 +815,7 @@ class DeezerMediaManager:
     async def create_playlist(self, name: str, media_types: set[MediaType]) -> Playlist:
         """Create a new playlist on provider with given name."""
         result = await self.provider.gql_client.create_playlist(
-            title=name, is_private=False, is_collaborative=False
+            title=name, is_private=True, is_collaborative=False
         )
         if result.playlist is None:
             msg = f"Failed to create playlist '{name}' on Deezer"
