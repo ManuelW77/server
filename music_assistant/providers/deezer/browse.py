@@ -98,7 +98,6 @@ class DeezerBrowseManager:
         self.instance_id = provider.instance_id
         self.domain = provider.domain
         self.logger = provider.logger
-        self._browse_slug_cache: dict[str, str] = {}
 
     # -- Browse routing --
 
@@ -132,15 +131,17 @@ class DeezerBrowseManager:
 
         if subpath == BROWSE_SHAKER:
             if sub_subpath:
-                group_id = self._browse_slug_cache.get(f"shaker/{sub_subpath}", sub_subpath)
-                return await self._browse_shaker_group(group_id)
+                return await self._browse_shaker_group(sub_subpath)
             return await self._browse_shaker_root(path)
 
         if subpath == BROWSE_AUDIOBOOKS:
             if sub_subpath:
-                page_path = self._browse_slug_cache.get(
-                    f"audiobooks/{sub_subpath}", f"channels/{sub_subpath}"
-                )
+                # The path segment encodes the real target (module:<id> or
+                # channel slug), so deep links survive a server restart.
+                if sub_subpath.startswith("module:"):
+                    page_path = f"channels/module/{sub_subpath.removeprefix('module:')}"
+                else:
+                    page_path = f"channels/{sub_subpath}"
                 return await self._browse_audiobooks_page(page_path)
             return await self._browse_audiobooks_root(path)
 
@@ -487,13 +488,11 @@ class DeezerBrowseManager:
                 group = edge.node
                 members = group.estimated_members_count
                 name = f"{group.name} ({members} member{'s' if members != 1 else ''})"
-                path_name = group.name.replace("/", "-")
-                self._browse_slug_cache[f"shaker/{path_name}"] = group.id
                 folders.append(
                     BrowseFolder(
                         item_id=f"shaker_{group.id}",
                         provider=self.instance_id,
-                        path=f"{base}{path_name}",
+                        path=f"{base}{group.id}",
                         name=name,
                     )
                 )
@@ -563,12 +562,10 @@ class DeezerBrowseManager:
                         continue
                     slug = target.removeprefix("/channels/")
                     channel_name = data.get("name", slug)
-                    path_name = channel_name.replace("/", "-")
-                    self._browse_slug_cache[f"audiobooks/{path_name}"] = f"channels/{slug}"
                     folder = BrowseFolder(
                         item_id=f"audiobooks_{slug}",
                         provider=self.instance_id,
-                        path=f"{base}{path_name}",
+                        path=f"{base}{slug}",
                         name=channel_name,
                     )
                     folder.image = get_gw_item_image(self.provider, item)
@@ -577,12 +574,10 @@ class DeezerBrowseManager:
                 module_id = section.get("module_id", "")
                 if not module_id:
                     continue
-                path_name = title.replace("/", "-")
-                self._browse_slug_cache[f"audiobooks/{path_name}"] = f"channels/module/{module_id}"
                 folder = BrowseFolder(
                     item_id=f"audiobooks_section_{module_id}",
                     provider=self.instance_id,
-                    path=f"{base}{path_name}",
+                    path=f"{base}module:{module_id}",
                     name=title,
                 )
                 folder.image = get_gw_item_image(self.provider, first_item)
@@ -614,7 +609,7 @@ class DeezerBrowseManager:
             artists_first=0,
             hot_tracks_limit=50,
         )
-        await self._add_made_for_you(result, recs)
+        await self._add_made_for_you(result)
         self._add_recommended_playlists(result, recs)
         self._add_recommended_artist_playlists(result, recs)
         self._add_recommended_tracks(result, recs)
@@ -633,11 +628,7 @@ class DeezerBrowseManager:
             )
         return result
 
-    async def _add_made_for_you(
-        self,
-        result: list[RecommendationFolder],
-        recs: GetRecommendationsMe | None,
-    ) -> None:
+    async def _add_made_for_you(self, result: list[RecommendationFolder]) -> None:
         """Add Made For You section to recommendations."""
         made_for_me_items: list[Playlist] = []
         flow_me = await self.provider.gql_client.get_flow()
@@ -1085,6 +1076,9 @@ class DeezerBrowseManager:
 
     async def invalidate_playlist_cache(self, prov_playlist_id: str) -> None:
         """Invalidate the cached playlist tracks after a mutation."""
+        # Must mirror the @use_cache key derivation (func name + positional
+        # args, dot-joined) - breaks silently if _get_regular_playlist_tracks
+        # is renamed or ever called with a keyword argument.
         cache_key = f"_get_regular_playlist_tracks.{prov_playlist_id}"
         await self.mass.cache.delete(key=cache_key, provider=self.instance_id)
 
