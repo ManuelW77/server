@@ -24,7 +24,7 @@ from music_assistant_models.streamdetails import StreamDetails
 from music_assistant.helpers.app_vars import app_var
 from music_assistant.helpers.datetime import utc_timestamp
 
-from .gw_client import DeezerGWError
+from .gw_client import USER_AGENT_HEADER, DeezerGWError
 from .helpers import fetch_all_audiobook_chapter_edges, fetch_all_bookmarks
 
 if TYPE_CHECKING:
@@ -56,7 +56,7 @@ class DeezerStreamingManager:
         """
         if media_type != MediaType.PODCAST_EPISODE:
             return (False, 0, None)
-        bookmarks = await fetch_all_bookmarks(self.provider.gql_client)
+        bookmarks = await fetch_all_bookmarks(self.provider.gql_client, stop_at_episode_id=item_id)
         if item_id in bookmarks:
             is_played, position_ms = bookmarks[item_id]
             return (is_played, position_ms, None)
@@ -182,7 +182,7 @@ class DeezerStreamingManager:
         result = await self.provider.gql_client.get_livestream(livestream_id=item_id)
         if result is None or not result.media:
             raise MediaNotFoundError(f"Radio {item_id} has no stream URL")
-        # Prefer HLS, then AAC, then MP3
+        # Prefer the HLS stream when available, otherwise take the first offered
         best_media = result.media[0]
         for media in result.media:
             if media.codec and media.codec.type_ == "hls":
@@ -317,18 +317,22 @@ class DeezerStreamingManager:
         blowfish_key = self._get_blowfish_key(streamdetails.data["track_id"])
         chunk_index = 0
         timeout = ClientTimeout(total=None, connect=30, sock_read=600)
-        headers: dict[str, str] = {}
+        # Send the same browser UA as the gw-light/get_url calls — a mixed
+        # fingerprint on the CDN download is an easy block target.
+        headers: dict[str, str] = {"User-Agent": USER_AGENT_HEADER}
 
-        # Seek by skipping chunks (Range header causes malformed audio)
+        # Seek by skipping chunks (Range header causes malformed audio).
+        # Multiply before dividing — truncating chunks-per-second first would
+        # make the error grow with the seek position (~30s early at 5min for MP3_128).
         if seek_position and streamdetails.size and streamdetails.duration:
             chunk_count = ceil(streamdetails.size / 2048)
-            skip_chunks = int(chunk_count / streamdetails.duration) * seek_position
+            skip_chunks = chunk_count * seek_position // streamdetails.duration
         else:
             skip_chunks = 0
 
         buffer = bytearray()
         streamdetails.data["start_ts"] = utc_timestamp()
-        streamdetails.data["stream_id"] = uuid.uuid1()
+        streamdetails.data["stream_id"] = uuid.uuid4()
         self.mass.create_task(self.provider.gw_client.log_listen(next_track=streamdetails.item_id))
         async with self.mass.http_session.get(
             streamdetails.data["url"], headers=headers, timeout=timeout

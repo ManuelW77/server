@@ -182,11 +182,14 @@ async def fetch_all_audiobook_chapter_edges(
     return all_edges
 
 
-async def fetch_all_bookmarks(gql_client: DeezerGQLClient) -> dict[str, tuple[bool, int]]:
+async def fetch_all_bookmarks(
+    gql_client: DeezerGQLClient, stop_at_episode_id: str | None = None
+) -> dict[str, tuple[bool, int]]:
     """
     Paginate through all podcast episode bookmarks and return a lookup dict.
 
     :param gql_client: The Deezer GQL client to use.
+    :param stop_at_episode_id: Optionally stop paginating early once this episode was found.
     :returns: Dict mapping episode ID to (is_played, position_ms).
     """
     bookmarks: dict[str, tuple[bool, int]] = {}
@@ -201,6 +204,8 @@ async def fetch_all_bookmarks(gql_client: DeezerGQLClient) -> dict[str, tuple[bo
                     edge.node.is_played,
                     edge.node.position * 1000,
                 )
+        if stop_at_episode_id is not None and stop_at_episode_id in bookmarks:
+            break
         if not result.podcast_episode_bookmarks.page_info.has_next_page:
             break
         cursor = result.podcast_episode_bookmarks.page_info.end_cursor
