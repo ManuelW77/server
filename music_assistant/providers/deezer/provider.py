@@ -13,9 +13,9 @@ from collections.abc import AsyncGenerator, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from deezer_python_gql import DeezerGQLClient, GraphQLClientError
+from deezer_python_gql import DeezerGQLClient, GraphQLClientAuthError, GraphQLClientError
 from music_assistant_models.enums import MediaType, ProviderFeature
-from music_assistant_models.errors import LoginFailed
+from music_assistant_models.errors import LoginFailed, SetupFailedError
 
 from music_assistant.models.music_provider import MusicProvider
 
@@ -101,16 +101,16 @@ class DeezerProvider(MusicProvider):
             self.user_id = me.id
             self.gw_client = GWClient(self.mass.http_session, arl_token)
             await self.gw_client.setup()
-        except (GraphQLClientError, DeezerGWError) as err:
+        except GraphQLClientAuthError as err:
+            # Deezer definitively rejected the ARL — no point in retrying.
             raise LoginFailed("Deezer authentication failed. Please check your ARL token.") from err
+        except (GraphQLClientError, DeezerGWError) as err:
+            # Transient failure (server error, network) — MA retries the setup.
+            raise SetupFailedError(f"Deezer setup failed: {err}") from err
 
         self.media_manager = DeezerMediaManager(self)
         self.browse_manager = DeezerBrowseManager(self)
         self.streaming_manager = DeezerStreamingManager(self)
-
-    async def unload(self, is_removed: bool = False) -> None:
-        """Handle unload/close of the provider."""
-        await super().unload(is_removed)
 
     # -- Library retrieval --
 
