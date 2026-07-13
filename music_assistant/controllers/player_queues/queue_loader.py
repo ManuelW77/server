@@ -58,6 +58,7 @@ from music_assistant.controllers.webserver.helpers.auth_middleware import (
     set_current_user,
 )
 from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
+from music_assistant.helpers.uri import parse_uri
 
 if TYPE_CHECKING:
     from music_assistant_models.media_items.metadata import MediaItemImage
@@ -553,14 +554,21 @@ class QueueLoaderMixin(_PlayerQueuesBase):
         # items normally. Keys off is_dynamic since a finite-only queue records sources too.
         already_dynamic = queue.is_dynamic and option in (QueueOption.ADD, QueueOption.NEXT)
 
-        media_items: list[MediaItemType] = []
+        # each media item is paired with the provider instance the request originated from
+        # (None when the request was library-based), so stream resolution can prefer
+        # the specifically requested provider's version over the default quality-based pick
+        media_items: list[tuple[MediaItemType, str | None]] = []
         source_items: list[MediaItemType] = []
         # resolve all media items
         for item in media_list:
             try:
                 # parse provided uri into a MA MediaItem or Basic QueueItem from URL
                 media_item: MediaItemType | ItemMapping | BrowseFolder
+                requested_provider: str | None = None
                 if isinstance(item, str):
+                    # capture the provider from the raw uri before it is resolved
+                    # (resolving prefers the library item, losing the requested provider)
+                    _, requested_provider, _ = await parse_uri(item)
                     media_item = await self.mass.music.get_item_by_uri(item)
                 elif isinstance(item, dict):  # type: ignore[unreachable]
                     # TODO: Investigate why the API parser sometimes passes raw dicts instead of
@@ -569,9 +577,14 @@ class QueueLoaderMixin(_PlayerQueuesBase):
                     # in some cases. This is defensive handling for that parser bug.
                     media_item = media_from_dict(item)  # type: ignore[unreachable]
                     self.logger.debug("Converted to: %s", type(media_item))
+                    requested_provider = media_item.provider
                 else:
                     # item is MediaItemType | ItemMapping at this point
                     media_item = item
+                    requested_provider = media_item.provider
+                if requested_provider == "library":
+                    # a library-based request has no specific provider version preference
+                    requested_provider = None
 
                 if (
                     isinstance(media_item, ItemMapping)
@@ -653,13 +666,14 @@ class QueueLoaderMixin(_PlayerQueuesBase):
                         start_item_uri = start_item
                     elif start_item is not None:
                         start_item_uri = start_item.uri
-                    media_items += await self._media_resolver._resolve_media_items(
+                    resolved_items = await self._media_resolver._resolve_media_items(
                         media_item,
                         start_item_uri,
                         userid=queue_data.userid,
                         queue_id=queue_id,
                         sort_by=sort_by,
                     )
+                    media_items += [(x, requested_provider) for x in resolved_items]
 
             except MusicAssistantError as err:
                 # invalid MA uri or item not found error
@@ -685,8 +699,12 @@ class QueueLoaderMixin(_PlayerQueuesBase):
 
         # only add valid/available items
         queue_items: list[QueueItem] = [
-            build_queue_item(queue_id, cast("PlayableMediaItemType", x))
-            for x in media_items
+            build_queue_item(
+                queue_id,
+                cast("PlayableMediaItemType", x),
+                preferred_provider_instance=requested_provider,
+            )
+            for x, requested_provider in media_items
             if x and x.available
         ]
 

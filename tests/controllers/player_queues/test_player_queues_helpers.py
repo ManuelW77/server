@@ -22,7 +22,10 @@ from music_assistant_models.player_queue import PlayerQueue
 from music_assistant_models.queue_item import QueueItem
 from music_assistant_models.unique_list import UniqueList
 
-from music_assistant.constants import ATTR_PLAY_ACTION_IN_PROGRESS
+from music_assistant.constants import (
+    ATTR_PLAY_ACTION_IN_PROGRESS,
+    ATTR_PREFERRED_PROVIDER_INSTANCE,
+)
 from music_assistant.controllers.player_queues.helpers import (
     build_queue_item,
     get_current_playback_speed,
@@ -379,3 +382,26 @@ class TestBuildQueueItem:
         assert restored.media_item.item_id == "t1"
         assert restored.image is not None
         assert restored.image.type is ImageType.THUMB
+
+    def test_preferred_provider_instance_stored(self) -> None:
+        """The requested provider instance is stored on the queue item's extra attributes."""
+        item = build_queue_item(
+            "q1", _heavy_track(), preferred_provider_instance="filesystem_local--abc123"
+        )
+        assert item.extra_attributes[ATTR_PREFERRED_PROVIDER_INSTANCE] == "filesystem_local--abc123"
+
+    def test_no_preferred_provider_instance_by_default(self) -> None:
+        """Without an explicit preference no extra attribute is set."""
+        item = build_queue_item("q1", _heavy_track())
+        assert ATTR_PREFERRED_PROVIDER_INSTANCE not in item.extra_attributes
+
+    def test_preferred_provider_instance_survives_cache_roundtrip(self) -> None:
+        """The provider preference survives the persisted-cache roundtrip."""
+        original = build_queue_item(
+            "q1", _heavy_track(), preferred_provider_instance="filesystem_local--abc123"
+        )
+        restored = QueueItem.from_cache(original.to_cache())
+        assert (
+            restored.extra_attributes[ATTR_PREFERRED_PROVIDER_INSTANCE]
+            == "filesystem_local--abc123"
+        )

@@ -50,6 +50,7 @@ from music_assistant_models.player_queue import PlayLogEntry
 from music_assistant_models.streamdetails import MultiPartPath, StreamMetadata
 
 from music_assistant.constants import (
+    ATTR_PREFERRED_PROVIDER_INSTANCE,
     CONF_CROSSFADE_DURATION,
     CONF_ENTRY_CROSSFADE_DIFFERENT_SAMPLE_RATES,
     CONF_ENTRY_OUTPUT_LIMITER,
@@ -276,6 +277,19 @@ class StreamsAudio:
                 preferred_providers = playback_user.provider_filter
             else:
                 preferred_providers = [x.provider_instance for x in media_item.provider_mappings]
+            # handle steering into the specifically requested provider version, e.g. the user
+            # browsed a specific provider and played an item from there: prefer that provider's
+            # version (the second pass below still falls back to any other provider on failure)
+            preferred_instance = queue_item.extra_attributes.get(ATTR_PREFERRED_PROVIDER_INSTANCE)
+            if isinstance(preferred_instance, str) and (
+                matching_instances := [
+                    x.provider_instance
+                    for x in media_item.provider_mappings
+                    if preferred_instance in (x.provider_instance, x.provider_domain)
+                    and x.provider_instance in preferred_providers
+                ]
+            ):
+                preferred_providers = matching_instances
             # Remember the last AudioError so we can re-raise its (actionable)
             # message instead of the generic MediaNotFoundError below.
             last_audio_error: AudioError | None = None

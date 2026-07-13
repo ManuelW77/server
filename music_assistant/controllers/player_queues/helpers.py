@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING, Any, Concatenate, Protocol, TypedDict, TypeVar
 from music_assistant_models.media_items import MediaItemMetadata, Playlist, Track
 from music_assistant_models.queue_item import QueueItem
 
-from music_assistant.constants import ATTR_PLAY_ACTION_IN_PROGRESS, PlaylistPlayableItem
+from music_assistant.constants import (
+    ATTR_PLAY_ACTION_IN_PROGRESS,
+    ATTR_PREFERRED_PROVIDER_INSTANCE,
+    PlaylistPlayableItem,
+)
 from music_assistant.controllers.players.constants import PlayerLockPurpose
 
 if TYPE_CHECKING:
@@ -104,7 +108,11 @@ def has_dynamic_source(source_items: list[MediaItemType]) -> bool:
     return any(isinstance(item, Playlist) and item.is_dynamic for item in source_items)
 
 
-def build_queue_item(queue_id: str, media_item: PlayableMediaItemType) -> QueueItem:
+def build_queue_item(
+    queue_id: str,
+    media_item: PlayableMediaItemType,
+    preferred_provider_instance: str | None = None,
+) -> QueueItem:
     """
     Build a QueueItem for enqueueing, keeping its media item slim.
 
@@ -115,12 +123,17 @@ def build_queue_item(queue_id: str, media_item: PlayableMediaItemType) -> QueueI
 
     :param queue_id: The id of the queue the item is created for.
     :param media_item: The source media item to enqueue.
+    :param preferred_provider_instance: Optional provider instance (or domain) the playback
+        request originated from (e.g. the provider that was browsed); stream resolution will
+        prefer this provider's version of the item when available.
     """
     queue_item = QueueItem.from_media_item(queue_id, media_item)
     if isinstance(queue_item.media_item, Track):
         # the list-row artwork is already captured on QueueItem.image, so dropping the
         # track's metadata here does not lose anything the queue listing still needs
         queue_item.media_item.metadata = MediaItemMetadata()
+    if preferred_provider_instance:
+        queue_item.extra_attributes[ATTR_PREFERRED_PROVIDER_INSTANCE] = preferred_provider_instance
     return queue_item
 
 
