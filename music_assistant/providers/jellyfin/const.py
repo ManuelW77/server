@@ -38,12 +38,16 @@ ITEM_KEY_ALBUM_ID: Final = "AlbumId"
 ITEM_KEY_ARTIST_ITEMS: Final = "ArtistItems"
 ITEM_KEY_CAN_DOWNLOAD: Final = "CanDownload"
 ITEM_KEY_PARENT_INDEX_NUM: Final = "ParentIndexNumber"
+ITEM_KEY_PATH: Final = "Path"
 ITEM_KEY_RUNTIME_TICKS: Final = "RunTimeTicks"
 ITEM_KEY_USER_DATA: Final = "UserData"
+
+M3U_PLAYLIST_EXTENSIONS: Final = (".m3u", ".m3u8")
 
 USER_DATA_KEY_IS_FAVORITE: Final = "IsFavorite"
 
 MEDIA_TYPE_AUDIO: Final = "Audio"
+MEDIA_TYPE_UNKNOWN: Final = "Unknown"
 
 SUPPORTED_CONTAINER_FORMATS: Final = "ogg,flac,mp3,aac,mpeg,alac,wav,aiff,wma,m4a,m4b,dsf,opus,wv"
 
@@ -63,6 +67,9 @@ TRACK_FIELDS: Final = [
     ItemFields.SortName,
     ItemFields.MediaSources,
     ItemFields.MediaStreams,
+]
+PLAYLIST_FIELDS: Final = [
+    ItemFields.Path,
 ]
 
 USER_APP_NAME: Final = "Music Assistant"

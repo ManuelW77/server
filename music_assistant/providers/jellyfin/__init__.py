@@ -47,8 +47,12 @@ from .const import (
     ITEM_KEY_MEDIA_STREAMS,
     ITEM_KEY_MEDIA_TYPE,
     ITEM_KEY_NAME,
+    ITEM_KEY_PATH,
     ITEM_KEY_RUNTIME_TICKS,
+    M3U_PLAYLIST_EXTENSIONS,
     MEDIA_TYPE_AUDIO,
+    MEDIA_TYPE_UNKNOWN,
+    PLAYLIST_FIELDS,
     SUPPORTED_CONTAINER_FORMATS,
     TRACK_FIELDS,
     USER_APP_NAME,
@@ -316,11 +320,18 @@ class JellyfinProvider(MusicProvider):
             stream = (
                 self._client.playlists.parent(playlist_library[ITEM_KEY_ID])
                 .enable_userdata()
+                .fields(*PLAYLIST_FIELDS)
                 .stream(100)
             )
             async for playlist in stream:
                 if ITEM_KEY_MEDIA_TYPE in playlist:  # Only jellyfin has this property
                     if playlist[ITEM_KEY_MEDIA_TYPE] == MEDIA_TYPE_AUDIO:
+                        yield parse_playlist(self.instance_id, self._client, playlist)
+                    elif playlist[ITEM_KEY_MEDIA_TYPE] == MEDIA_TYPE_UNKNOWN and str(
+                        playlist.get(ITEM_KEY_PATH, "")
+                    ).lower().endswith(M3U_PLAYLIST_EXTENSIONS):
+                        # m3u/file-backed playlists report MediaType "Unknown"; require an m3u
+                        # path so other "Unknown" playlists (e.g. video) stay excluded
                         yield parse_playlist(self.instance_id, self._client, playlist)
                 else:  # emby playlists are only audio type
                     yield parse_playlist(self.instance_id, self._client, playlist)
@@ -402,6 +413,18 @@ class JellyfinProvider(MusicProvider):
             .start_index(page * 100)
             .request()
         )
+        if not playlist_items["Items"]:
+            # The /Playlists/{id}/Items endpoint returns nothing for playlists
+            # imported from m3u/file; fall back to querying the playlist's
+            # children directly
+            playlist_items = (
+                await self._client.tracks.parent(prov_playlist_id)
+                .enable_userdata()
+                .fields(*TRACK_FIELDS)
+                .limit(100)
+                .start_index(page * 100)
+                .request()
+            )
         for index, jellyfin_track in enumerate(playlist_items["Items"], 1):
             pos = (page * 100) + index
             try:
