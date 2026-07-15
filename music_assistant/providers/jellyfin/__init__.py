@@ -44,10 +44,7 @@ from .const import (
     ITEM_KEY_ID,
     ITEM_KEY_MEDIA_STREAMS,
     ITEM_KEY_NAME,
-    ITEM_KEY_PATH,
     ITEM_KEY_RUNTIME_TICKS,
-    M3U_PLAYLIST_EXTENSIONS,
-    PLAYLIST_FIELDS,
     SUPPORTED_CONTAINER_FORMATS,
     TRACK_FIELDS,
     UNKNOWN_ARTIST_MAPPING,
@@ -323,23 +320,27 @@ class JellyfinProvider(MusicProvider):
     async def get_library_playlists(self) -> AsyncGenerator[Playlist]:
         """Retrieve all library playlists from the provider."""
         playlist_libraries = await self._get_playlists()
+        self.logger.debug("Found %d Jellyfin playlist librarie(s)", len(playlist_libraries))
         for playlist_library in playlist_libraries:
             stream = (
                 self._client.playlists.parent(playlist_library[ITEM_KEY_ID])
                 .enable_userdata()
-                .fields(*PLAYLIST_FIELDS)
                 .stream(100)
             )
             async for playlist in stream:
+                media_type = playlist.get("MediaType")
+                self.logger.debug(
+                    "Found Jellyfin playlist %s (Type=%s, MediaType=%s)",
+                    playlist.get(ITEM_KEY_NAME),
+                    playlist.get("Type"),
+                    media_type,
+                )
                 if "MediaType" in playlist:  # Only jellyfin has this property
-                    if playlist["MediaType"] == "Audio":
-                        yield parse_playlist(self.instance_id, self._client, playlist)
-                    elif playlist["MediaType"] == "Unknown" and str(
-                        playlist.get(ITEM_KEY_PATH, "")
-                    ).lower().endswith(M3U_PLAYLIST_EXTENSIONS):
-                        # Playlists imported from m3u/file report MediaType "Unknown";
-                        # only accept ones actually backed by an m3u file so other
-                        # "Unknown" playlists (e.g. video) stay excluded.
+                    # Native Jellyfin playlists report MediaType "Audio", but playlists
+                    # imported from an m3u/file report "Unknown" - accept both so that
+                    # externally created m3u playlists also show up. Real video playlists
+                    # report "Video" and stay excluded.
+                    if media_type in ("Audio", "Unknown"):
                         yield parse_playlist(self.instance_id, self._client, playlist)
                 else:  # emby playlists are only audio type
                     yield parse_playlist(self.instance_id, self._client, playlist)
@@ -413,18 +414,28 @@ class JellyfinProvider(MusicProvider):
     async def get_playlist_tracks(self, prov_playlist_id: str, page: int = 0) -> list[Track]:
         """Get playlist tracks."""
         result: list[Track] = []
-        playlist_items = (
-            await self._client.tracks.in_playlist(prov_playlist_id)
-            .enable_userdata()
-            .fields(*TRACK_FIELDS)
-            .limit(100)
-            .start_index(page * 100)
-            .request()
-        )
+        try:
+            playlist_items = (
+                await self._client.tracks.in_playlist(prov_playlist_id)
+                .enable_userdata()
+                .fields(*TRACK_FIELDS)
+                .limit(100)
+                .start_index(page * 100)
+                .request()
+            )
+        except Exception as err:
+            # The /Playlists/{id}/Items endpoint may error (rather than return empty) for
+            # playlists imported from m3u/file; fall back to the parent query below.
+            self.logger.debug(
+                "in_playlist query failed for %s, falling back to parent query: %s",
+                prov_playlist_id,
+                err,
+            )
+            playlist_items = {"Items": []}
         if not playlist_items["Items"]:
-            # The /Playlists/{id}/Items endpoint returns nothing for playlists imported
-            # from m3u/file. Fall back to querying the playlist's children directly,
-            # which does return the tracks (ordering is left for MA to handle).
+            # The /Playlists/{id}/Items endpoint returns nothing (or errors) for playlists
+            # imported from m3u/file. Fall back to querying the playlist's children
+            # directly, which does return the tracks (ordering is left for MA to handle).
             playlist_items = (
                 await self._client.tracks.parent(prov_playlist_id)
                 .enable_userdata()
