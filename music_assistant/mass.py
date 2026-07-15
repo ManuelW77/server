@@ -40,6 +40,7 @@ from music_assistant.constants import (
 )
 from music_assistant.controllers.cache import CacheController
 from music_assistant.controllers.config import ConfigController
+from music_assistant.controllers.diagnostics import DiagnosticsController
 from music_assistant.controllers.discovery import DiscoveryController
 from music_assistant.controllers.metadata import MetaDataController
 from music_assistant.controllers.music import MusicController
@@ -55,6 +56,7 @@ from music_assistant.controllers.webserver.helpers.auth_middleware import (
 )
 from music_assistant.helpers.aiohttp_client import create_clientsession
 from music_assistant.helpers.api import APICommandHandler, api_command
+from music_assistant.helpers.diagnostics import install_diagnostics_log_handler
 from music_assistant.helpers.images import get_icon_string
 from music_assistant.helpers.util import (
     TaskManager,
@@ -143,6 +145,7 @@ class MusicAssistant:
     discovery: DiscoveryController
     streams: StreamsController
     translations: TranslationController
+    diagnostics: DiagnosticsController
 
     def __init__(self, storage_path: str, cache_path: str, safe_mode: bool = False) -> None:
         """Initialize the MusicAssistant Server."""
@@ -176,6 +179,10 @@ class MusicAssistant:
         self.loop = asyncio.get_running_loop()
         # start() runs on the event loop thread, so this is the loop's thread id.
         self.loop_thread_id = threading.get_ident()
+        # ensure the always-on diagnostics capture handler is installed as early as
+        # possible so boot-time errors are captured (idempotent, also installed by
+        # __main__ but embedded usage boots the server directly)
+        install_diagnostics_log_handler()
         self.running_as_hass_addon = await is_hass_supervisor()
         self.version = await get_package_version("music_assistant") or "0.0.0"
         # setup config controller first and fetch important config values
@@ -204,6 +211,7 @@ class MusicAssistant:
         self.player_queues = PlayerQueuesController(self)
         self.streams = StreamsController(self)
         self.translations = TranslationController(self)
+        self.diagnostics = DiagnosticsController(self)
         # add manifests for core controllers
         for controller_name in CONFIGURABLE_CORE_CONTROLLERS:
             controller: CoreController = getattr(self, controller_name)
@@ -229,6 +237,7 @@ class MusicAssistant:
             tg.create_task(setup_controller(self.metadata))
             tg.create_task(setup_controller(self.players))
             tg.create_task(setup_controller(self.player_queues))
+            tg.create_task(setup_controller(self.diagnostics))
 
         for controller_name in (
             "cache",
@@ -281,6 +290,7 @@ class MusicAssistant:
         await self.player_queues.close()
         await self.players.close()
         await self.translations.close()
+        await self.diagnostics.close()
         # cleanup cache and config
         await self.config.close()
         await self.cache.close()
@@ -735,13 +745,21 @@ class MusicAssistant:
         self,
         prov_conf: ProviderConfig,
     ) -> None:
-        """Try to load a provider and catch errors."""
+        """Load (or reload) a provider from its config, recording any load failure."""
         # cancel existing (re)load timer if needed
         task_id = f"load_provider_{prov_conf.instance_id}"
         if existing := self._tracked_timers.pop(task_id, None):
             existing.cancel()
 
-        await self._load_provider(prov_conf)
+        try:
+            await self._load_provider(prov_conf)
+        except Exception as exc:
+            # persist the failure so the provider surfaces a clear status (e.g. auth_required)
+            # to the UI instead of appearing stuck loading, then propagate to the caller
+            self.config.update_provider_last_error(
+                prov_conf.instance_id, _provider_error_from_exc(exc)
+            )
+            raise
 
         # (re)load any dependants
         prov_configs = await self.config.get_provider_configs(include_values=True)
@@ -866,9 +884,18 @@ class MusicAssistant:
                 await self._update_available_providers_cache()
                 self.signal_event(EventType.PROVIDERS_UPDATED, data=self.get_providers())
 
-    async def unload_provider_with_error(self, instance_id: str, error: str) -> None:
-        """Unload a provider when it got into trouble which needs user interaction."""
-        prov_error = ProviderError(error_code=999, message=error)
+    async def unload_provider_with_error(self, instance_id: str, error: str | Exception) -> None:
+        """
+        Unload a provider that hit a problem which needs user interaction.
+
+        :param error: The originating exception (preferred, so e.g. a LoginFailed surfaces as an
+            auth-required status with a localized message) or a plain string for a generic error.
+        """
+        prov_error = (
+            _provider_error_from_exc(error)
+            if isinstance(error, Exception)
+            else ProviderError(error_code=999, message=error)
+        )
         self.config.update_provider_last_error(instance_id, prov_error)
         await self.unload_provider(instance_id)
 
@@ -921,6 +948,7 @@ class MusicAssistant:
             self.webserver,
             self.webserver.auth,
             self.streams.audio_analysis,
+            self.diagnostics,
         ):
             for attr_name in dir(cls):
                 if attr_name.startswith("__"):

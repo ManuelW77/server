@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,6 +11,7 @@ from music_assistant_models.enums import ExternalID
 from music_assistant_models.errors import MusicAssistantError
 
 from music_assistant.constants import (
+    DB_TABLE_AUDIO_ANALYSIS,
     DB_TABLE_EXTERNAL_ID_LOOKUP,
     DB_TABLE_PLAYLOG,
     DB_TABLE_SETTINGS,
@@ -276,3 +278,82 @@ async def test_migrate_database_backfills_external_id_lookup(
     )
     assert not old_indexes
     await music.database.close()
+
+
+async def test_migration_repairs_null_smart_fades_centroids(
+    database: DatabaseConnection,
+) -> None:
+    """Null spectral centroid values in legacy Smart Fades analysis rows become 0.0."""
+    await database.execute(
+        f"""CREATE TABLE {DB_TABLE_AUDIO_ANALYSIS}(
+            [id] INTEGER PRIMARY KEY AUTOINCREMENT,
+            [aa_provider_domain] TEXT NOT NULL,
+            [analysis_data] json NOT NULL)"""
+    )
+    rows = {
+        1: ("smart_fades", '{"spectral_centroid": [1.5, null, 2.5, null], "bpm": 120}'),
+        2: ("smart_fades", '{"spectral_centroid": [1.0, 2.0], "bpm": 100}'),
+        # null centroids from another analysis provider must not be touched
+        3: ("other_domain", '{"spectral_centroid": [null], "bpm": 100}'),
+        # a corrupt payload must not abort the migration
+        4: ("smart_fades", '{"spectral_centroid": [null'),
+    }
+    for row_id, (domain, analysis_data) in rows.items():
+        await database.execute(
+            f"INSERT INTO {DB_TABLE_AUDIO_ANALYSIS} (id, aa_provider_domain, analysis_data) "
+            "VALUES (:id, :domain, :analysis_data)",
+            {"id": row_id, "domain": domain, "analysis_data": analysis_data},
+        )
+    await database.commit()
+
+    mass = MagicMock()
+    mass.cache.clear = AsyncMock()
+    await migrate_database(
+        mass,
+        database,
+        MagicMock(),
+        prev_version=52,
+        create_tables=AsyncMock(),
+    )
+
+    repaired = {
+        row["id"]: row["analysis_data"] for row in await database.get_rows(DB_TABLE_AUDIO_ANALYSIS)
+    }
+    assert json.loads(repaired[1]) == {"spectral_centroid": [1.5, 0.0, 2.5, 0.0], "bpm": 120}
+    # untouched rows must not be rewritten at all, hence the exact-string compare
+    for untouched_id in (2, 3, 4):
+        assert repaired[untouched_id] == rows[untouched_id][1]
+
+
+async def test_migration_populates_fts_tables(database: DatabaseConnection) -> None:
+    """Migrating a pre-FTS database builds and fills the FTS search tables."""
+    await database.execute("DROP TABLE tracks")
+    await database.execute(
+        "CREATE TABLE tracks([item_id] INTEGER PRIMARY KEY, "
+        "[external_ids] json NOT NULL DEFAULT '[]', [search_name] TEXT NOT NULL)"
+    )
+    await database.execute(
+        "INSERT INTO tracks(item_id, search_name) VALUES (1, 'bohemianrhapsody')"
+    )
+    await database.execute("INSERT INTO tracks(item_id, search_name) VALUES (2, 'radiogaga')")
+    await database.commit()
+
+    mass = MagicMock()
+    mass.cache.clear = AsyncMock()
+    await migrate_database(
+        mass,
+        database,
+        MagicMock(),
+        prev_version=51,
+        create_tables=AsyncMock(),
+    )
+
+    rows = await database.get_rows_from_query(
+        "SELECT rowid FROM tracks_fts WHERE tracks_fts MATCH :term", {"term": '"rhapsody"'}
+    )
+    assert [row["rowid"] for row in rows] == [1]
+    # tables without a search_name column (stand-ins in this bare test db) are skipped
+    rows = await database.get_rows_from_query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'albums_fts'"
+    )
+    assert not rows

@@ -35,6 +35,7 @@ from music_assistant.constants import (
     DEFAULT_GENRE_MAPPING,
     GENRE_ICONS_DIR_NAME,
     LOUDNESS_MEASUREMENT_MIN_LUFS,
+    MEDIA_ITEM_DB_TABLES,
 )
 from music_assistant.controllers.music.constants import DB_SCHEMA_VERSION
 from music_assistant.controllers.music.media.genres import GenreController
@@ -801,6 +802,75 @@ async def migrate_database(  # noqa: PLR0915
             )
             await database.execute(f"ALTER TABLE {table} DROP COLUMN external_ids")
 
+    if prev_version <= 52:
+        audio_analysis_table_exists = await database.get_rows_from_query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = :table_name",
+            {"table_name": DB_TABLE_AUDIO_ANALYSIS},
+            limit=1,
+        )
+        if audio_analysis_table_exists:
+            # SQLite does not guarantee WHERE-term evaluation order, so a bare
+            # json_valid() term cannot reliably shield json_each()/json_type()
+            # from raising on malformed rows - guard their input directly instead
+            result = await database.execute(
+                f"""WITH RECURSIVE
+                null_centroids AS (
+                    SELECT
+                        aa.id,
+                        '$.spectral_centroid[' || centroid.key || ']' AS path,
+                        row_number() OVER (
+                            PARTITION BY aa.id
+                            ORDER BY CAST(centroid.key AS INTEGER)
+                        ) AS sequence
+                    FROM {DB_TABLE_AUDIO_ANALYSIS} AS aa,
+                        json_each(
+                            CASE WHEN json_valid(aa.analysis_data)
+                                THEN aa.analysis_data END,
+                            '$.spectral_centroid'
+                        ) AS centroid
+                    WHERE aa.aa_provider_domain = :aa_provider_domain
+                        AND aa.analysis_data LIKE '%null%'
+                        AND json_type(
+                            CASE WHEN json_valid(aa.analysis_data)
+                                THEN aa.analysis_data END,
+                            '$.spectral_centroid'
+                        ) = 'array'
+                        AND centroid.type = 'null'
+                ),
+                repaired(id, analysis_data, sequence) AS (
+                    SELECT aa.id, aa.analysis_data, 0
+                    FROM {DB_TABLE_AUDIO_ANALYSIS} AS aa
+                    WHERE aa.id IN (SELECT id FROM null_centroids)
+
+                    UNION ALL
+
+                    SELECT
+                        repaired.id,
+                        json_set(repaired.analysis_data, null_centroids.path, 0.0),
+                        null_centroids.sequence
+                    FROM repaired
+                    JOIN null_centroids
+                        ON null_centroids.id = repaired.id
+                        AND null_centroids.sequence = repaired.sequence + 1
+                )
+                UPDATE {DB_TABLE_AUDIO_ANALYSIS} AS aa
+                SET analysis_data = (
+                    SELECT repaired.analysis_data
+                    FROM repaired
+                    WHERE repaired.id = aa.id
+                    ORDER BY repaired.sequence DESC
+                    LIMIT 1
+                )
+                WHERE aa.id IN (SELECT id FROM null_centroids)""",
+                {"aa_provider_domain": "smart_fades"},
+            )
+            if result.rowcount:
+                logger.info(
+                    "Repaired null spectral centroid values in %d Smart Fades "
+                    "audio analysis row(s)",
+                    result.rowcount,
+                )
+
     # NOTE: this genre restore runs after the <= 50 step on purpose: it inserts genres
     # with the current code/schema, so the external_ids column must be gone first.
     if prev_version <= 47:
@@ -814,6 +884,27 @@ async def migrate_database(  # noqa: PLR0915
             await mass.music.genres.restore_default_genres(full_restore=False)
         except Exception as err:
             logger.warning("Could not seed default podcast/audiobook genres: %s", err)
+
+    # (re)build the FTS search tables so they are in sync with the content tables;
+    # this both populates them on first migration to the FTS-enabled schema and
+    # repairs them after any migration that rewrote rows without the sync triggers active
+    for table in MEDIA_ITEM_DB_TABLES:
+        table_columns = {
+            x["name"]
+            for x in await database.get_rows_from_query(f"PRAGMA table_info({table})", limit=0)
+        }
+        if "search_name" not in table_columns:
+            # guard against (test) databases with stand-in tables
+            continue
+        await database.execute(
+            f"""CREATE VIRTUAL TABLE IF NOT EXISTS {table}_fts USING fts5(
+                search_name,
+                content='{table}',
+                content_rowid='item_id',
+                tokenize='trigram'
+                );"""
+        )
+        await database.execute(f"INSERT INTO {table}_fts({table}_fts) VALUES('rebuild')")
 
     # save changes
     await database.commit()
