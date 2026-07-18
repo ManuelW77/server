@@ -78,6 +78,7 @@ if TYPE_CHECKING:
 CONF_BASE_URL = "baseURL"
 CONF_ENABLE_PODCASTS = "enable_podcasts"
 CONF_ENABLE_LEGACY_AUTH = "enable_legacy_auth"
+CONF_USE_GET = "use_get"
 CONF_RECO_FAVES = "recommend_favorites"
 CONF_NEW_ALBUMS = "recommend_new"
 CONF_PLAYED_ALBUMS = "recommend_played"
@@ -120,6 +121,7 @@ class OpenSonicProvider(MusicProvider):
             port=port,
             server_path=str(path),
             app_name="Music Assistant",
+            use_get=bool(self.config.get_value(CONF_USE_GET)),
         )
         try:
             success = await self.conn.ping()

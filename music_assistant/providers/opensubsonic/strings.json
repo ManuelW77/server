@@ -28,6 +28,10 @@
       "label": "Enable Legacy Auth",
       "description": "Enable OpenSubsonic \"legacy\" auth support"
     },
+    "use_get": {
+      "label": "Use GET",
+      "description": "Use HTTP GET requests instead of POST requests"
+    },
     "recommend_favorites": {
       "label": "Recommend Favorites",
       "description": "Should favorited (starred) items be included as recommendations."

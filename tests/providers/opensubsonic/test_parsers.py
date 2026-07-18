@@ -3,6 +3,7 @@
 import logging
 import pathlib
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, Mock, patch
 
 import aiofiles
 import pytest
@@ -18,7 +19,9 @@ from libopensonic.media import (
     PodcastEpisode,
     StructuredLyrics,
 )
+from music_assistant_models.enums import ConfigEntryType
 
+from music_assistant.providers.opensubsonic import get_config_entries
 from music_assistant.providers.opensubsonic.parsers import (
     parse_album,
     parse_artist,
@@ -28,6 +31,7 @@ from music_assistant.providers.opensubsonic.parsers import (
     parse_structured_lyrics,
     parse_track,
 )
+from music_assistant.providers.opensubsonic.sonic_provider import OpenSonicProvider
 
 if TYPE_CHECKING:
     from syrupy.assertion import SnapshotAssertion
@@ -43,6 +47,62 @@ LYRICS_FIXTURES = list(FIXTURES_DIR.glob("lyrics/*.lyrics.json"))
 STRUCTURED_LYRICS_FIXTURES = list(FIXTURES_DIR.glob("structured-lyrics/*.structured-lyrics.json"))
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def test_get_config_entries_exposes_use_get_as_advanced_option() -> None:
+    """The Open Subsonic provider exposes the HTTP method as an advanced option."""
+    entries = await get_config_entries(None)  # type: ignore[arg-type]
+    use_get = next(entry for entry in entries if entry.key == "use_get")
+
+    assert use_get.type == ConfigEntryType.BOOLEAN
+    assert use_get.default_value is False
+    assert use_get.required is False
+    assert use_get.advanced is True
+
+
+async def test_handle_async_init_passes_use_get_to_connection() -> None:
+    """Provider initialization forwards the configured HTTP method to libopensonic."""
+    mass = Mock(cache=Mock())
+    manifest = Mock(domain="opensubsonic", name="OpenSubsonic")
+    config = Mock(name="OpenSubsonic Test", instance_id="opensubsonic-test", enabled=True)
+    config.get_value.side_effect = {
+        "baseURL": "https://bandcamp.com",
+        "username": "user",
+        "password": "password",
+        "port": 443,
+        "path": "api/subsonic",
+        "use_get": True,
+        "enable_legacy_auth": False,
+        "enable_podcasts": False,
+        "recommend_favorites": False,
+        "recommend_new": False,
+        "recommend_played": False,
+        "recommendation_count": 10,
+        "pagination_size": 200,
+        "request_raw_file": True,
+        "log_level": "INFO",
+    }.get
+    connection = AsyncMock()
+    connection.ping.return_value = True
+    connection.get_open_subsonic_extensions.return_value = []
+
+    with patch(
+        "music_assistant.providers.opensubsonic.sonic_provider.SonicConnection",
+        return_value=connection,
+    ) as connection_class:
+        provider = OpenSonicProvider(mass, manifest, config, set())
+        await provider.handle_async_init()
+
+    connection_class.assert_called_once_with(
+        "https://bandcamp.com",
+        username="user",
+        password="password",
+        legacy_auth=False,
+        port=443,
+        server_path="api/subsonic",
+        app_name="Music Assistant",
+        use_get=True,
+    )
 
 
 @pytest.mark.parametrize("example", ARTIST_FIXTURES, ids=lambda val: str(val.stem))

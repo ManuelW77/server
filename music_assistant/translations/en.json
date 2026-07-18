@@ -1557,6 +1557,8 @@
   "provider.opensubsonic.config_entries.recommendation_count.label": "Recommendation Limit",
   "provider.opensubsonic.config_entries.request_raw_file.description": "Request that the server provide the original source file without applying any transcoding rules.",
   "provider.opensubsonic.config_entries.request_raw_file.label": "No Transcoding For Streams",
+  "provider.opensubsonic.config_entries.use_get.description": "Use HTTP GET requests instead of POST requests",
+  "provider.opensubsonic.config_entries.use_get.label": "Use GET",
   "provider.opensubsonic.config_entries.username.description": "Your username for this Open Subsonic server",
   "provider.opensubsonic.errors.connect_failed": "Failed to connect to {0}, check your settings.",
   "provider.opensubsonic.errors.create_playlist_failed": "Failed to create playlist with name '{0}'.",

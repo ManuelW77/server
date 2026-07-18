@@ -19,6 +19,7 @@ from .sonic_provider import (
     CONF_RAW_FILE,
     CONF_RECO_FAVES,
     CONF_RECO_SIZE,
+    CONF_USE_GET,
     OpenSonicProvider,
 )
 
@@ -102,6 +103,13 @@ async def get_config_entries(
             type=ConfigEntryType.BOOLEAN,
             required=True,
             default_value=False,
+        ),
+        ConfigEntry(
+            key=CONF_USE_GET,
+            type=ConfigEntryType.BOOLEAN,
+            required=False,
+            default_value=False,
+            advanced=True,
         ),
         ConfigEntry(
             key=CONF_RECO_FAVES,
