@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, cast
 
 import shortuuid
 from hass_client import HomeAssistantClient
-from hass_client.exceptions import BaseHassClientError
+from hass_client.exceptions import BaseHassClientError, ConnectionFailedDueToLargeMessage
 from hass_client.utils import (
     base_url,
     get_auth_url,
@@ -352,8 +352,7 @@ class HomeAssistantProvider(PluginProvider):
             await self.hass.connect()
         except BaseHassClientError as err:
             await self._cleanup_failed_init()
-            err_msg = str(err) or err.__class__.__name__
-            raise SetupFailedError(err_msg) from err
+            raise SetupFailedError(_format_hass_error(err)) from err
         self._listen_task = self.mass.create_task(self._hass_listener())
         try:
             await self._resolve_startup_features()
@@ -362,8 +361,7 @@ class HomeAssistantProvider(PluginProvider):
             raise
         except BaseHassClientError as err:
             await self._cleanup_failed_init()
-            err_msg = str(err) or err.__class__.__name__
-            raise SetupFailedError(err_msg) from err
+            raise SetupFailedError(_format_hass_error(err)) from err
         except Exception:
             await self._cleanup_failed_init()
             raise
@@ -539,8 +537,15 @@ class HomeAssistantProvider(PluginProvider):
         try:
             # start listening will block until the connection is lost/closed
             await self.hass.start_listening()
+        except ConnectionFailedDueToLargeMessage:
+            self.logger.error(
+                "Connection to HA lost because a websocket message exceeded the maximum "
+                "message size. This usually means the Home Assistant instance has a very "
+                "large number of entity states."
+            )
         except BaseHassClientError as err:
-            self.logger.warning("Connection to HA lost due to error: %s", err)
+            self.logger.warning("Connection to HA lost due to error: %s", _format_hass_error(err))
+            self.logger.debug("Connection to HA lost", exc_info=err)
         if not self._startup_complete:
             return
         self.logger.info("Connection to HA lost. Connection will be automatically retried later.")
@@ -802,3 +807,16 @@ def _select_feature_entity(
             return None
         return configured_entity if configured_entity in available_entity_ids else None
     return str(options[0].value) if options else None
+
+
+def _format_hass_error(err: BaseHassClientError) -> str:
+    """Return a descriptive (log) message for a hass-client exception."""
+    details = str(err)
+    # TransportError subclasses may carry the underlying exception which is not
+    # always reflected in the message itself
+    underlying = getattr(err, "error", None)
+    if underlying is not None and str(underlying) and str(underlying) != details:
+        details = f"{details} ({underlying})" if details else str(underlying)
+    if not details:
+        return type(err).__name__
+    return f"{type(err).__name__}: {details}"
