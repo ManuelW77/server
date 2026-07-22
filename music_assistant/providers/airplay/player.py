@@ -610,24 +610,39 @@ class AirPlayPlayer(Player):
         AirPlay players only report their volume level when we are actually streaming to them
         and we remember the last used/reported volume level in the player config by default
         but if we have a parent player, that may know better about the current volume level,
-        so we try to sync from that parent player if possible
+        so we try to sync from that parent player if possible. If another protocol player
+        owns the parent's volume, we play at unity gain instead.
         """
+        if not self.protocol_parent_id:
+            return
+        parent_player = self.mass.players.get_player(self.protocol_parent_id)
+        if not parent_player:
+            return
+        volume_control = parent_player.volume_control
+        if volume_control == PLAYER_CONTROL_NATIVE:
+            # Native parent volume is on the receiver/amplifier scale.
+            # Keep the AirPlay child volume learned from DACP feedback instead.
+            return
         if (
-            self.protocol_parent_id
-            and (parent_player := self.mass.players.get_player(self.protocol_parent_id))
-            and parent_player.state.volume_level is not None
+            volume_control != self.player_id
+            and (control_player := self.mass.players.get_player(volume_control))
+            and control_player.underlying_player_id != self.player_id
         ):
-            if self._has_native_protocol_parent:
-                # Native parent volume is on the receiver/amplifier scale.
-                # Keep the AirPlay child volume learned from DACP feedback instead.
-                return
-            if self._attr_volume_level == parent_player.state.volume_level:
-                return
-            self._attr_volume_level = parent_player.state.volume_level
-            self.mass.config.set_raw_player_config_value(
-                self.player_id, CONF_STORED_VOLUME, self._attr_volume_level
-            )
-            self.update_state()
+            # Another protocol player (e.g. DLNA hardware volume) owns the parent's volume;
+            # play at unity gain so we don't attenuate on top of it. Not persisted.
+            if self._attr_volume_level != 100:
+                self._attr_volume_level = 100
+                self.update_state()
+            return
+        if parent_player.state.volume_level is None:
+            return
+        if self._attr_volume_level == parent_player.state.volume_level:
+            return
+        self._attr_volume_level = parent_player.state.volume_level
+        self.mass.config.set_raw_player_config_value(
+            self.player_id, CONF_STORED_VOLUME, self._attr_volume_level
+        )
+        self.update_state()
 
     async def on_config_updated(self) -> None:
         """Handle logic when the player config is updated."""
@@ -646,14 +661,6 @@ class AirPlayPlayer(Player):
         if self._active_pairing:
             await self._active_pairing.close()
             self._active_pairing = None
-
-    @property
-    def _has_native_protocol_parent(self) -> bool:
-        """Return True if this AirPlay protocol player is linked to a native parent."""
-        if not self.protocol_parent_id:
-            return False
-        parent_player = self.mass.players.get_player(self.protocol_parent_id)
-        return bool(parent_player and parent_player.volume_control == PLAYER_CONTROL_NATIVE)
 
     def _get_flags(self) -> int:
         # Flags are either present via "sf" or "flags". Taken from pyatv.protocols.airplay.utils.
