@@ -29,6 +29,19 @@ if TYPE_CHECKING:
     from .provider import AirPlayProvider
 
 
+def _is_master_or_mute_receiver(player: AirPlayPlayer) -> bool:
+    """
+    Return whether this receiver only renders audio on its own PTP clock.
+
+    Samsung AirPlay receivers accept a sender-clocked session normally but
+    render silence; they need the session timeline yielded to them (the same
+    thing Apple senders do against them).
+    """
+    model = (player.device_info.model or "").lower()
+    manufacturer = (player.device_info.manufacturer or "").lower()
+    return model.startswith("hw-") or "samsung" in model or "samsung" in manufacturer
+
+
 class AirPlayStreamSession:
     """Stream session (RAOP or AirPlay2) to one or more players."""
 
@@ -83,7 +96,15 @@ class AirPlayStreamSession:
     async def start(self, audio_source: AsyncGenerator[bytes]) -> None:
         """Initialize stream session for all players."""
         ap2_members = sum(1 for p in self.sync_clients if p.protocol == StreamingProtocol.AIRPLAY2)
-        self._ptp_follow = ap2_members == 1 and len(self.sync_clients) == 1
+        # Follow mode is scoped to master-or-mute receivers (Samsung) until the
+        # clock daemon can broker per-peer roles: the in-process engine cannot
+        # bind 319/320 next to the daemon, so a follow session runs without the
+        # shared clock — acceptable only for devices that are silent otherwise.
+        self._ptp_follow = (
+            ap2_members == 1
+            and len(self.sync_clients) == 1
+            and _is_master_or_mute_receiver(self.sync_clients[0])
+        )
         if ap2_members and not self._ptp_follow:
             # Resolve the timing source before calculating the audible anchor so
             # a bounded daemon-readiness wait cannot consume the setup lead.

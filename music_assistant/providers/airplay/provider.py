@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import socket
 import time
 from contextlib import suppress
@@ -638,6 +639,11 @@ class AirPlayProvider(PlayerProvider):
 
     async def _start_ptp_daemon(self) -> None:
         """Spawn the shared PTP clock daemon (cliairplay --ptp-daemon)."""
+        if os.environ.get("MASS_DISABLE_PTP_DAEMON"):
+            # Debug escape: leave UDP 319/320 free so a per-session engine can
+            # bind them (e.g. validating receiver-clock follow mode).
+            self.logger.warning("Shared PTP clock daemon disabled via environment")
+            return
         try:
             cli_binary = await get_cli_binary()
         except RuntimeError as err:
