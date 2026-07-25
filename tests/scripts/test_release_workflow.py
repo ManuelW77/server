@@ -30,10 +30,27 @@ from scripts.release_workflow import (
 
 ROOT = Path(__file__).parents[2]
 AUTO_MERGE_WORKFLOW = ROOT / ".github" / "workflows" / "auto-merge-dependency-updates.yml"
-PINNED_WORKFLOW_FILES = (
+PINNED_ACTION_FILES = (
     ROOT / ".github" / "workflows" / "release.yml",
     ROOT / ".github" / "workflows" / "auto-release.yml",
+    ROOT / ".github" / "workflows" / "build-base-image.yml",
+    ROOT / ".github" / "workflows" / "dependabot-sync-manifests.yml",
+    ROOT / ".github" / "workflows" / "pr-labels.yaml",
     ROOT / ".github" / "actions" / "generate-release-notes" / "action.yml",
+)
+LEGACY_AUTH_FILES = (
+    *PINNED_ACTION_FILES,
+    ROOT / ".github" / "release-notes-config.yml",
+)
+FORBIDDEN_LEGACY_IDENTIFIERS = tuple(
+    separator.join(parts)
+    for separator, parts in (
+        ("_", ("PRIVILEGED", "GITHUB", "TOKEN")),
+        ("_", ("TRIAGE", "GITHUB", "TOKEN")),
+        ("_", ("TRIAGE", "APP", "ID")),
+        ("_", ("TRIAGE", "APP", "PRIVATE", "KEY")),
+        ("-", ("music", "assistant", "machine")),
+    )
 )
 
 
@@ -317,17 +334,22 @@ def test_addon_update_replaces_duplicate_version_and_retains_three(tmp_path: Pat
     assert "# [oldest]" in first_result
 
 
-def test_release_workflows_pin_external_actions_and_drop_legacy_token() -> None:
-    """Touched release flows use commit-pinned actions and no privileged PAT."""
-    action_pattern = re.compile(r"^\s*uses:\s+([^./][^@]+)@(\S+)(?:\s+#\s+(.+))?$", re.MULTILINE)
-    for workflow_path in PINNED_WORKFLOW_FILES:
+def test_automation_drops_legacy_credentials() -> None:
+    """Ensure migrated automation does not reference retired bot credentials."""
+    for automation_path in LEGACY_AUTH_FILES:
+        automation = automation_path.read_text(encoding="utf-8")
+        for forbidden in FORBIDDEN_LEGACY_IDENTIFIERS:
+            assert forbidden not in automation
+
+
+def test_automation_pins_external_actions() -> None:
+    """Ensure migrated automation pins external actions to immutable commits."""
+    action_pattern = re.compile(
+        r"^\s*(?:-\s+)?uses:\s+([^./][^@]+)@(\S+)(?:\s+#\s+(.+))?$",
+        re.MULTILINE,
+    )
+    for workflow_path in PINNED_ACTION_FILES:
         workflow = workflow_path.read_text(encoding="utf-8")
-        for forbidden in (
-            "PRIVILEGED_GITHUB_TOKEN",
-            "TRIAGE_GITHUB_TOKEN",
-            "music-assistant-machine",
-        ):
-            assert forbidden not in workflow
         matches = action_pattern.findall(workflow)
         assert matches
         for _action, ref, comment in matches:
@@ -486,6 +508,28 @@ def test_release_workflow_uses_minimum_preflight_permissions_and_expected_app() 
     assert "'.default_branch'" in workflow
 
 
+def test_release_workflow_publication_state_uses_release_ids() -> None:
+    """Publication lookup must use release IDs and fail closed on mismatches."""
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert "DRAFT_RELEASE_ID: ${{ needs.prepare_draft.outputs.release_id }}" in workflow
+    assert "PUBLISHED_RELEASE_ID: ${{ needs.resolve.outputs.release_id }}" in workflow
+    assert "RELEASE_STATE: ${{ needs.resolve.outputs.release_state }}" in workflow
+
+    publication_step = _workflow_step_run(
+        workflow,
+        job_name="publish_release",
+        step_name="Detect live publication state",
+    )
+
+    assert 'gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION"' not in publication_step
+    assert 'gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"' in publication_step
+    assert 'case "$RELEASE_STATE" in' in publication_step
+    assert "Missing release id for $RELEASE_STATE release $VERSION" in publication_step
+    assert "tag_name" in publication_step
+    assert "Release $VERSION resolves to tag $live_tag_name" in publication_step
+    assert "Release $VERSION is neither a mutable draft nor immutable" in publication_step
+
+
 def _api_asset(path: Path) -> dict[str, str | int]:
     return {
         "name": path.name,
@@ -559,3 +603,12 @@ def _auto_merge_dependency_trust_check(
             return False, "One or more commits are not authored by the trusted GitHub App bot"
 
     return True, "accepted"
+
+
+def _workflow_step_run(workflow: str, job_name: str, step_name: str) -> str:
+    jobs = yaml.safe_load(workflow)["jobs"]
+    for step in jobs[job_name]["steps"]:
+        if step.get("name") == step_name:
+            return str(step["run"])
+    msg = f"Step {step_name!r} not found in job {job_name!r}"
+    raise AssertionError(msg)
