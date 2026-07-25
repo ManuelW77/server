@@ -82,6 +82,8 @@ jobs:
 
       # Security check 4: Verify all commit authors are the trusted bot
       - name: Verify commit authors
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # A dependency bump PR only ever needs a handful of commits
           COMMIT_COUNT="${{ github.event.pull_request.commits }}"
