@@ -1138,6 +1138,8 @@ class AirPlayStreamSession:
         misplaced). When any member was corrected, every member is re-STARTed
         at the largest reported instant so the group converges on one shared
         instant; the recorded session anchor is always the verified truth.
+        A solo member is never re-STARTed: its corrected instant is simply
+        adopted as the anchor, since there is no partner to converge with.
 
         :param position_ms: Media position mapped to the first sample of the anchor.
         :param start_unix_ms: Shared audible-start instant in unix epoch ms.
@@ -1168,6 +1170,15 @@ class AirPlayStreamSession:
                     continue  # older binary without a started ack
                 corrected_ms = max(corrected_ms, actual - adjust_ms)
             if corrected_ms <= target_ms + 2:
+                break
+            if len(member_tasks) == 1:
+                # A lone member has no partner to converge with and its binary
+                # already scheduled the corrected instant exactly, so adopt that
+                # as the anchor. A re-START would trail the live playout head
+                # (the correction means the commanded lead was already too
+                # short) and be corrected forward again, audibly replaying the
+                # seconds in between.
+                target_ms = corrected_ms
                 break
             self.prov.logger.warning(
                 "AirPlay group start corrected: a member could not honor %d, "
