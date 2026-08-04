@@ -9592,3 +9592,268 @@ class TestLocalAudioStubMigration:
 
         assert await migrate(data) is True
         assert await migrate(data) is False
+
+
+class TestSameHostMultiInstanceMatching:
+    """
+    Tests for matching multiple same-protocol instances on a single host.
+
+    Scenario: several shairport-sync instances (and matching DLNA renderers) run
+    on one machine, so every instance advertises the same IP and a
+    locally-administered MAC. The shared IP can then no longer identify a
+    device, and pairing must follow the advertised names instead.
+
+    Reproduces: https://github.com/music-assistant/support/issues/5985
+    """
+
+    HOST_IP = "10.100.1.20"
+
+    @staticmethod
+    def _make_airplay_player(
+        provider: MockProvider, player_id: str, name: str, mac: str
+    ) -> MockPlayer:
+        """Create an airplay protocol player with a locally-administered MAC."""
+        player = MockPlayer(
+            provider,
+            player_id,
+            name,
+            player_type=PlayerType.PROTOCOL,
+            identifiers={
+                IdentifierType.MAC_ADDRESS: mac,
+                IdentifierType.AIRPLAY_ID: player_id,
+                IdentifierType.IP_ADDRESS: TestSameHostMultiInstanceMatching.HOST_IP,
+            },
+        )
+        player.set_initialized()
+        return player
+
+    @staticmethod
+    def _make_universal_player(
+        up_provider: UniversalPlayerProvider,
+        player_id: str,
+        name: str,
+        protocol_player_ids: list[str],
+    ) -> UniversalPlayer:
+        """Create a universal player advertising the shared host IP."""
+        up = UniversalPlayer(
+            provider=up_provider,
+            player_id=player_id,
+            name=name,
+            device_info=DeviceInfo(model="Test", manufacturer="Test"),
+            protocol_player_ids=protocol_player_ids,
+        )
+        up._attr_device_info.add_identifier(
+            IdentifierType.IP_ADDRESS, TestSameHostMultiInstanceMatching.HOST_IP
+        )
+        up._cache.clear()
+        up.update_state(signal_event=False)
+        up.set_initialized()
+        return up
+
+    def test_ambiguous_ip_requires_name_agreement(self, mock_mass: MagicMock) -> None:
+        """With multiple same-domain instances on one IP, only names may pair players."""
+        controller = PlayerController(mock_mass)
+        mock_mass.players = controller
+        airplay_provider = MockProvider("airplay", mass=mock_mass)
+        dlna_provider = MockProvider("dlna", mass=mock_mass)
+
+        # two shairport-sync instances on the same host (LA MACs, same IP)
+        ap_bedroom = self._make_airplay_player(
+            airplay_provider, "ap1ec1a11d5298", "Bedroom", "1E:C1:A1:1D:52:98"
+        )
+        ap_living = self._make_airplay_player(
+            airplay_provider, "ap3301fdbcc5f1", "Living Room", "33:01:FD:BC:C5:F1"
+        )
+        # matching DLNA renderers on the same host
+        dlna_bedroom = MockPlayer(
+            dlna_provider,
+            "uuid:f985a351",
+            "Bedroom",
+            player_type=PlayerType.PROTOCOL,
+            identifiers={IdentifierType.IP_ADDRESS: self.HOST_IP},
+        )
+        dlna_bedroom.set_initialized()
+        dlna_living = MockPlayer(
+            dlna_provider,
+            "uuid:b452b666",
+            "Living Room",
+            player_type=PlayerType.PROTOCOL,
+            identifiers={IdentifierType.IP_ADDRESS: self.HOST_IP},
+        )
+        dlna_living.set_initialized()
+
+        controller._players = {
+            p.player_id: p for p in (ap_bedroom, ap_living, dlna_bedroom, dlna_living)
+        }
+
+        # the shared IP may only pair the instances whose names agree
+        assert controller._identifiers_match(dlna_bedroom, ap_bedroom) is True
+        assert controller._identifiers_match(dlna_living, ap_living) is True
+        assert controller._identifiers_match(dlna_bedroom, ap_living) is False
+        assert controller._identifiers_match(dlna_living, ap_bedroom) is False
+
+    def test_unambiguous_ip_keeps_legacy_matching(self, mock_mass: MagicMock) -> None:
+        """A single instance per protocol on an IP still matches regardless of names."""
+        controller = PlayerController(mock_mass)
+        mock_mass.players = controller
+        airplay_provider = MockProvider("airplay", mass=mock_mass)
+        dlna_provider = MockProvider("dlna", mass=mock_mass)
+
+        ap_player = self._make_airplay_player(
+            airplay_provider, "ap1ec1a11d5298", "Living Room (AirPlay)", "1E:C1:A1:1D:52:98"
+        )
+        dlna_player = MockPlayer(
+            dlna_provider,
+            "uuid:b452b666",
+            "MediaRenderer",
+            player_type=PlayerType.PROTOCOL,
+            identifiers={IdentifierType.IP_ADDRESS: self.HOST_IP},
+        )
+        dlna_player.set_initialized()
+        controller._players = {p.player_id: p for p in (ap_player, dlna_player)}
+
+        # one instance per protocol: the shared IP identifies the device by itself
+        assert controller._identifiers_match(dlna_player, ap_player) is True
+
+    def test_universal_player_pairs_by_name_on_ambiguous_ip(self, mock_mass: MagicMock) -> None:
+        """A same-host airplay instance only matches the universal player it belongs to."""
+        controller = PlayerController(mock_mass)
+        mock_mass.players = controller
+        up_provider = create_mock_universal_provider(mock_mass)
+        airplay_provider = MockProvider("airplay", mass=mock_mass)
+
+        up_bedroom = self._make_universal_player(up_provider, "upf985a351", "Bedroom", [])
+        up_living = self._make_universal_player(up_provider, "upb452b666", "Living Room", [])
+        ap_bedroom = self._make_airplay_player(
+            airplay_provider, "ap1ec1a11d5298", "Bedroom", "1E:C1:A1:1D:52:98"
+        )
+
+        controller._players = {p.player_id: p for p in (up_bedroom, up_living, ap_bedroom)}
+
+        assert controller._identifiers_match(up_bedroom, ap_bedroom) is True
+        assert controller._identifiers_match(up_living, ap_bedroom) is False
+        assert controller._find_matching_universal_player(ap_bedroom) is up_bedroom
+
+    def test_renamed_universal_player_pairs_via_member_names(self, mock_mass: MagicMock) -> None:
+        """A user-renamed universal player is still identified by its members' names."""
+        controller = PlayerController(mock_mass)
+        mock_mass.players = controller
+        up_provider = create_mock_universal_provider(mock_mass)
+        airplay_provider = MockProvider("airplay", mass=mock_mass)
+        dlna_provider = MockProvider("dlna", mass=mock_mass)
+
+        # the universal player carries a custom name, its DLNA member advertises "Bedroom"
+        up_bedroom = self._make_universal_player(
+            up_provider, "upf985a351", "Master Suite", ["uuid:f985a351"]
+        )
+        up_other = self._make_universal_player(up_provider, "upb452b666", "Living Room", [])
+        dlna_bedroom = MockPlayer(
+            dlna_provider,
+            "uuid:f985a351",
+            "Bedroom",
+            player_type=PlayerType.PROTOCOL,
+            identifiers={IdentifierType.IP_ADDRESS: self.HOST_IP},
+        )
+        dlna_bedroom.set_initialized()
+        ap_bedroom = self._make_airplay_player(
+            airplay_provider, "ap1ec1a11d5298", "Bedroom", "1E:C1:A1:1D:52:98"
+        )
+
+        controller._players = {
+            p.player_id: p for p in (up_bedroom, up_other, dlna_bedroom, ap_bedroom)
+        }
+        controller._add_protocol_link(up_bedroom, dlna_bedroom, "dlna")
+
+        assert controller._identifiers_match(up_bedroom, ap_bedroom) is True
+
+    def test_stale_cached_parent_link_is_detached_and_repaired(self, mock_mass: MagicMock) -> None:
+        """
+        A persisted wrong pairing from a previous session is detached and re-paired.
+
+        The wrong pairing also persisted the airplay instance's identifiers on the
+        universal player, which would otherwise re-confirm the pairing via a direct
+        MAC match on every restart.
+        """
+        controller = PlayerController(mock_mass)
+        mock_mass.players = controller
+
+        config_store: dict[str, Any] = {
+            "players/upb452b666": {"enabled": True},
+            "players/upf985a351": {"enabled": True},
+            "players/ap1ec1a11d5298": {
+                "enabled": True,
+                "provider": "airplay",
+                "player_type": "protocol",
+                "default_name": "Bedroom",
+                "values": {"protocol_parent_id": "upb452b666"},
+            },
+            "players/uuid:f985a351": {
+                "enabled": True,
+                "provider": "dlna",
+                "player_type": "protocol",
+                "default_name": "Bedroom",
+                "values": {"protocol_parent_id": "upf985a351"},
+            },
+            "players/uuid:b452b666": {
+                "enabled": True,
+                "provider": "dlna",
+                "player_type": "protocol",
+                "default_name": "Living Room",
+                "values": {"protocol_parent_id": "upb452b666"},
+            },
+        }
+        mock_mass.config.get = MagicMock(side_effect=lambda k, d=None: config_store.get(k, d))
+        mock_mass.config.set = MagicMock(side_effect=lambda k, v: config_store.__setitem__(k, v))
+        mock_mass.create_task = MagicMock()
+
+        up_provider = create_mock_universal_provider(mock_mass)
+        airplay_provider = MockProvider("airplay", mass=mock_mass)
+        dlna_provider = MockProvider("dlna", mass=mock_mass)
+
+        # Living Room universal player wrongly tracks the Bedroom airplay instance,
+        # including the identifiers that instance contributed in a past session
+        up_living = self._make_universal_player(
+            up_provider, "upb452b666", "Living Room", ["uuid:b452b666", "ap1ec1a11d5298"]
+        )
+        up_living._attr_device_info.add_identifier(IdentifierType.MAC_ADDRESS, "1E:C1:A1:1D:52:98")
+        up_living._attr_device_info.add_identifier(IdentifierType.AIRPLAY_ID, "ap1ec1a11d5298")
+        up_bedroom = self._make_universal_player(
+            up_provider, "upf985a351", "Bedroom", ["uuid:f985a351"]
+        )
+        dlna_living = MockPlayer(
+            dlna_provider,
+            "uuid:b452b666",
+            "Living Room",
+            player_type=PlayerType.PROTOCOL,
+            identifiers={IdentifierType.IP_ADDRESS: self.HOST_IP},
+        )
+        dlna_living.set_initialized()
+        dlna_bedroom = MockPlayer(
+            dlna_provider,
+            "uuid:f985a351",
+            "Bedroom",
+            player_type=PlayerType.PROTOCOL,
+            identifiers={IdentifierType.IP_ADDRESS: self.HOST_IP},
+        )
+        dlna_bedroom.set_initialized()
+        ap_bedroom = self._make_airplay_player(
+            airplay_provider, "ap1ec1a11d5298", "Bedroom", "1E:C1:A1:1D:52:98"
+        )
+
+        controller._players = {
+            p.player_id: p for p in (up_living, up_bedroom, dlna_living, dlna_bedroom, ap_bedroom)
+        }
+        controller._add_protocol_link(up_living, dlna_living, "dlna")
+        controller._add_protocol_link(up_bedroom, dlna_bedroom, "dlna")
+
+        # the persisted (wrong) parent link must not be restored
+        assert controller._try_restore_cached_parent(ap_bedroom, "upb452b666", "airplay") is False
+        assert ap_bedroom.protocol_parent_id is None
+        assert "ap1ec1a11d5298" not in up_living._protocol_player_ids
+        assert IdentifierType.MAC_ADDRESS not in up_living.device_info.identifiers
+        assert IdentifierType.AIRPLAY_ID not in up_living.device_info.identifiers
+        assert config_store["players/ap1ec1a11d5298/values/protocol_parent_id"] is None
+
+        # a fresh search now pairs the instance with the right universal player
+        assert controller._try_link_to_existing_player(ap_bedroom, "airplay") is True
+        assert ap_bedroom.protocol_parent_id == "upf985a351"

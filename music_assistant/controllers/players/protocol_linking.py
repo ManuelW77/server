@@ -196,6 +196,13 @@ class ProtocolLinkingMixin:
             if parent_player.state.type == PlayerType.GROUP:
                 self._clear_protocol_parent_id(protocol_player.player_id)
                 return False
+            if self._universal_parent_link_is_stale(parent_player, protocol_player):
+                # A wrong pairing guessed from a shared IP in a previous session
+                # (multiple same-host instances): detach it - including the
+                # identifiers it left on the universal player - and fall through
+                # to a fresh search for the right parent.
+                self._detach_stale_universal_link(parent_player, protocol_player)
+                return False
             already_linked = any(
                 link.output_protocol_id == protocol_player.player_id
                 for link in parent_player.linked_output_protocols
@@ -258,6 +265,14 @@ class ProtocolLinkingMixin:
                     is_match = not is_known and self._identifiers_match(
                         native_player, protocol_player, protocol_domain
                     )
+                    if (is_known or is_match) and self._universal_parent_link_is_stale(
+                        native_player, protocol_player
+                    ):
+                        # A wrong pairing guessed from a shared IP in a previous
+                        # session (multiple same-host instances): detach its
+                        # leftovers and keep looking for the right parent.
+                        self._detach_stale_universal_link(native_player, protocol_player)
+                        continue
                     if is_known or is_match:
                         self._add_protocol_link(native_player, protocol_player, protocol_domain)
                         # Check if linking actually succeeded (may be refused for
@@ -546,10 +561,15 @@ class ProtocolLinkingMixin:
 
     def _find_matching_universal_player(self, protocol_player: Player) -> Player | None:
         """Find an existing universal player that matches this protocol player."""
-        for player in self._players.values():
+        for player in list(self._players.values()):
             if player.provider.domain != "universal_player":
                 continue
             if self._identifiers_match(protocol_player, player, ""):
+                if self._universal_parent_link_is_stale(player, protocol_player):
+                    # the match rests on identifiers a wrong pairing left behind
+                    # in a previous session: detach them and keep looking
+                    self._detach_stale_universal_link(player, protocol_player)
+                    continue
                 return player
         return None
 
@@ -1684,8 +1704,14 @@ class ProtocolLinkingMixin:
                 and is_valid_mac_address(mac_b)
                 and not is_locally_administered_mac(mac_b)
             )
-            # Case 1: at least one player has no real hardware MAC
+            # Case 1: at least one player has no real hardware MAC.
+            # A shared IP proves a shared host, not a shared device: when that
+            # host runs multiple instances of the same protocol (e.g. several
+            # shairport-sync instances), every instance advertises this same IP
+            # and only the advertised names can pair the right instances.
             if not (a_is_real and b_is_real):
+                if self._shared_ip_is_ambiguous(player_a, player_b, ip_a):
+                    return self._advertised_names_agree(player_a, player_b)
                 return True
             # Case 2: both have real MACs but at least one is a protocol/universal player
             a_is_protocol = (
@@ -1700,6 +1726,156 @@ class ProtocolLinkingMixin:
                 return True
 
         return False
+
+    def _shared_ip_is_ambiguous(self, player_a: Player, player_b: Player, ip: str) -> bool:
+        """
+        Return whether a shared IP cannot uniquely identify these players as one device.
+
+        A shared IP normally proves two players belong to the same physical device,
+        but when a host runs multiple instances of the same protocol (e.g. several
+        shairport-sync instances), every instance advertises that same IP. The same
+        holds when multiple universal players share one IP: each of them represents
+        a different instance living on that host.
+        """
+        pair_ids = {player_a.player_id, player_b.player_id}
+        pair_domains = {player_a.provider.domain, player_b.provider.domain}
+        for candidate in self.all_players(return_protocol_players=True):
+            if candidate.player_id in pair_ids:
+                continue
+            if candidate.underlying_player_id:
+                # derived players mirror another player's identity
+                continue
+            if candidate.provider.domain not in pair_domains:
+                continue
+            if candidate.device_info.identifiers.get(IdentifierType.IP_ADDRESS) == ip:
+                return True
+        return False
+
+    def _advertised_names_agree(self, player_a: Player, player_b: Player) -> bool:
+        """
+        Return whether two players agree on (any of) their advertised names.
+
+        Used to pair same-host instances that a shared IP cannot tell apart: the
+        advertised name is the only property in which those instances differ. A
+        universal player is also identified by the advertised names of its (other)
+        member protocol players, so a user rename does not break the pairing.
+        """
+        names_a = self._collect_match_names(player_a, exclude_player_id=player_b.player_id)
+        names_b = self._collect_match_names(player_b, exclude_player_id=player_a.player_id)
+        return bool(names_a & names_b)
+
+    def _collect_match_names(self, player: Player, exclude_player_id: str) -> set[str]:
+        """
+        Return the normalized advertised names identifying a player for matching.
+
+        :param player: The player to collect names for.
+        :param exclude_player_id: Member player to leave out when the player is a
+            universal player (the member currently being evaluated must not
+            confirm its own pairing).
+        """
+        names: set[str] = set()
+
+        def add_name(value: str | None) -> None:
+            if value and (normalized := " ".join(value.split()).casefold()):
+                names.add(normalized)
+
+        add_name(player.name)
+        add_name(player.display_name)
+        add_name(player.config.default_name)
+        if isinstance(player, UniversalPlayer):
+            for protocol_id in self._get_known_protocol_ids(player):
+                if protocol_id == exclude_player_id:
+                    continue
+                if member := self.get_player(protocol_id):
+                    add_name(member.name)
+                member_conf = self.mass.config.get(f"{CONF_PLAYERS}/{protocol_id}")
+                if isinstance(member_conf, dict):
+                    add_name(member_conf.get("default_name"))
+        return names
+
+    def _universal_parent_link_is_stale(self, parent: Player, protocol_player: Player) -> bool:
+        """
+        Return whether a (cached) universal-parent pairing is an unverifiable mismatch.
+
+        Guards against pairings that were guessed from a shared IP between multiple
+        same-host instances (e.g. several shairport-sync instances) and then
+        persisted - including the instance's identifiers, which makes the wrong
+        pairing self-confirming on every restart. A pairing counts as stale when
+        the protocol player carries no real hardware MAC (a self-derived, locally
+        administered one at best), no independent identifier confirms the pairing,
+        the shared IP is ambiguous, and the advertised names do not agree.
+        """
+        if parent.provider.domain != "universal_player":
+            return False
+        identifiers = protocol_player.device_info.identifiers
+        mac = identifiers.get(IdentifierType.MAC_ADDRESS)
+        if mac and is_valid_mac_address(mac) and not is_locally_administered_mac(mac):
+            return False
+        # an agreeing serial/UUID is independent evidence the pairing is correct
+        # (unlike MAC/AIRPLAY_ID, which the protocol player contributed itself)
+        parent_identifiers = parent.device_info.identifiers
+        for id_type in (
+            IdentifierType.SERIAL_NUMBER,
+            IdentifierType.UUID,
+            IdentifierType.CAST_UUID,
+        ):
+            val_a = parent_identifiers.get(id_type)
+            val_b = identifiers.get(id_type)
+            if not val_a or not val_b:
+                continue
+            if val_a.lower().replace(":", "").replace("-", "") == val_b.lower().replace(
+                ":", ""
+            ).replace("-", ""):
+                return False
+        ip = identifiers.get(IdentifierType.IP_ADDRESS)
+        if not ip or parent_identifiers.get(IdentifierType.IP_ADDRESS) != ip:
+            return False
+        if not self._shared_ip_is_ambiguous(parent, protocol_player, ip):
+            return False
+        return not self._advertised_names_agree(parent, protocol_player)
+
+    def _detach_stale_universal_link(self, parent: Player, protocol_player: Player) -> None:
+        """
+        Detach a stale universal-parent pairing, including its persisted traces.
+
+        Removes the link, the membership and the identifiers the protocol player
+        contributed to the universal player, so the wrong pairing cannot
+        re-confirm itself through those stored identifiers on the next match.
+        """
+        self.logger.info(
+            "Detaching %s from universal player %s: the pairing cannot be confirmed "
+            "(multiple %s instances share this host and the advertised names differ)",
+            protocol_player.display_name,
+            parent.display_name,
+            protocol_player.provider.domain,
+        )
+        self._remove_protocol_link(parent, protocol_player.player_id)
+        if isinstance(parent, UniversalPlayer):
+            parent.remove_protocol_player(protocol_player.player_id)
+            self._purge_contributed_identifiers(parent, protocol_player)
+            self._save_universal_player_data(parent)
+        parent.refresh_state()
+
+    def _purge_contributed_identifiers(
+        self, parent: UniversalPlayer, protocol_player: Player
+    ) -> None:
+        """Remove the identifiers a protocol player contributed to a universal player."""
+        parent_identifiers = parent.device_info.identifiers
+        for id_type, value in protocol_player.device_info.identifiers.items():
+            # the IP belongs to the whole host, not to this member alone
+            if id_type == IdentifierType.IP_ADDRESS:
+                continue
+            stored = parent_identifiers.get(id_type)
+            if not stored:
+                continue
+            if id_type == IdentifierType.MAC_ADDRESS:
+                if normalize_mac_for_matching(stored) != normalize_mac_for_matching(value):
+                    continue
+            elif stored.lower().replace(":", "").replace("-", "") != value.lower().replace(
+                ":", ""
+            ).replace("-", ""):
+                continue
+            del parent_identifiers[id_type]
 
     def _select_best_output_protocol(self, player: Player) -> tuple[Player, OutputProtocol | None]:
         """
