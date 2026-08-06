@@ -46,6 +46,9 @@ class LibrariesHelper(DataClassDictMixin):
     narrators: dict[str, set[str]] = field(default_factory=dict)
     # audiobook_id is key. Abs does not have a dedicated narrator endpoint.
     audiobook_narrators: dict[str, set[NarratorHelper]] = field(default_factory=dict)
+    # mapping of abs native collection name and position
+    # book_id: [(position, collection_name), ...]
+    audiobook_collections: dict[str, set[tuple[int, str]]] = field(default_factory=dict)
 
 
 @dataclass(kw_only=True)

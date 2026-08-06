@@ -126,6 +126,7 @@ from .constants import (
     CONF_HIDE_EMPTY_PODCASTS,
     CONF_OLD_TOKEN,
     CONF_PASSWORD,
+    CONF_SYNC_ABS_COLLECTIONS,
     CONF_URL,
     CONF_USERNAME,
     CONF_VERIFY_SSL,
@@ -204,6 +205,13 @@ class Audiobookshelf(RecommendationPayloadMixin, MusicProvider):
     async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
         """Return Config entries to setup this provider."""
         return (
+            ConfigEntry(
+                key=CONF_SYNC_ABS_COLLECTIONS,
+                type=ConfigEntryType.BOOLEAN,
+                required=False,
+                advanced=False,
+                default_value=False,
+            ),
             ConfigEntry(
                 key=CONF_HIDE_EMPTY_PODCASTS,
                 type=ConfigEntryType.BOOLEAN,
@@ -415,6 +423,7 @@ for more details.
         if media_type == MediaType.AUDIOBOOK:
             self.libraries.audiobooks.clear()
             self.libraries.audiobook_narrators.clear()
+            self.libraries.audiobook_collections.clear()
         elif media_type == MediaType.PODCAST:
             self.libraries.podcasts.clear()
         elif media_type == MediaType.PLAYLIST:
@@ -561,6 +570,7 @@ for more details.
                         token=self._client.token,
                         media_progress=progress,
                         base_url=str(self.get_setup_value(CONF_URL)).rstrip("/"),
+                        collections_dict=self.libraries.audiobook_collections,
                     )
                 )
             elif isinstance(item, AbsPlaylistItemExpandedPodcast):
@@ -836,6 +846,19 @@ for more details.
 
         Need expanded version for chapters.
         """
+        if bool(self.config.get_value(CONF_SYNC_ABS_COLLECTIONS)):
+            for book_lib_id in self.libraries.audiobooks:
+                async for collection_response in self._client.get_library_collections(
+                    library_id=book_lib_id
+                ):
+                    if not collection_response.results:
+                        break
+                    for collection in collection_response.results:
+                        for book_cnt, book in enumerate(collection.books):
+                            current = self.libraries.audiobook_collections.get(book.id_, set())
+                            current.add((book_cnt, collection.name))
+                            self.libraries.audiobook_collections[book.id_] = current
+
         for book_lib_id in self.libraries.audiobooks:
             async for response in self._client.get_library_items(library_id=book_lib_id):
                 if not response.results:
@@ -856,6 +879,7 @@ for more details.
                         domain=self.domain,
                         token=self._client.token,
                         base_url=str(self.get_setup_value(CONF_URL)).rstrip("/"),
+                        collections_dict=self.libraries.audiobook_collections,
                     )
                     yield mass_audiobook
 
@@ -887,6 +911,7 @@ for more details.
             token=self._client.token,
             base_url=str(self.get_setup_value(CONF_URL)).rstrip("/"),
             media_progress=progress,
+            collections_dict=self.libraries.audiobook_collections,
         )
 
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
@@ -1712,6 +1737,7 @@ for more details.
                         domain=self.domain,
                         token=self._client.token,
                         base_url=str(self.get_setup_value(CONF_URL)).rstrip("/"),
+                        collections_dict=self.libraries.audiobook_collections,
                     ),
                     overwrite_existing=True,
                 )

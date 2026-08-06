@@ -282,6 +282,7 @@ def parse_audiobook(
     base_url: str,
     audiobook_narrators: set[AbsNarrator] | set[NarratorHelper],
     media_progress: AbsMediaProgress | None = None,
+    collections_dict: dict[str, set[tuple[int, str]]] | None = None,  # only needed for library sync
 ) -> MassAudiobook:
     """Translate AbsBook to Mass Book."""
     title = abs_audiobook.media.metadata.title
@@ -328,6 +329,9 @@ def parse_audiobook(
                 title=abs_series_sequence.name, sequence=abs_series_sequence.sequence
             )
         )
+    if collections_dict is not None and (collections := collections_dict.get(abs_audiobook.id_)):
+        for coll_position, coll_name in collections:
+            book_series.append(MediaItemCollection(title=coll_name, sequence=coll_position))
 
     if book_series:
         mass_audiobook.metadata.collections = UniqueList(book_series)

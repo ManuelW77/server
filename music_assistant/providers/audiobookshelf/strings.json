@@ -29,6 +29,10 @@
     "hide_empty_podcasts": {
       "label": "Hide empty podcasts.",
       "description": "This will skip podcasts with no episodes associated."
+    },
+    "sync_abs_collections": {
+      "label": "Sync native audiobookshelf collections.",
+      "description": "This will sync native audiobookshelf collections _additionally_ to series."
     }
   },
   "media": {

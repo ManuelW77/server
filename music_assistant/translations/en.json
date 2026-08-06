@@ -977,6 +977,8 @@
   "provider.audiobookshelf.config_entries.hide_empty_podcasts.description": "This will skip podcasts with no episodes associated.",
   "provider.audiobookshelf.config_entries.hide_empty_podcasts.label": "Hide empty podcasts.",
   "provider.audiobookshelf.config_entries.label.label": "Please provide the address of your Audiobookshelf instance. To authenticate you have two options: a) Provide username AND password. Leave the API key empty. b) Provide ONLY an API key.",
+  "provider.audiobookshelf.config_entries.sync_abs_collections.description": "This will sync native audiobookshelf collections _additionally_ to series.",
+  "provider.audiobookshelf.config_entries.sync_abs_collections.label": "Sync native audiobookshelf collections.",
   "provider.audiobookshelf.config_entries.token.label": "old token",
   "provider.audiobookshelf.config_entries.url.description": "The URL of the Audiobookshelf server to connect to. For example https://abs.domain.tld/ or http://192.168.1.4:13378/",
   "provider.audiobookshelf.config_entries.url.label": "Server",
