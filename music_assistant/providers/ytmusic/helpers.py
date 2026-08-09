@@ -21,6 +21,47 @@ from music_assistant.providers.ytmusic.constants import YTMRecommendationIcons
 # subset of ytmusicapi's accepted search filters that we use
 YTMSearchFilter = Literal["artists", "albums", "songs", "playlists", "podcasts"]
 
+# max length of a (raw) ytmusicapi error before we truncate it for logging,
+# as these errors tend to embed the entire (multi KB) API response
+MAX_ERROR_LENGTH = 250
+
+
+async def is_session_authenticated(
+    headers: dict[str, str], language: str = "en", user: str | None = None
+) -> bool:
+    """
+    Check if the (cookie based) credentials still result in a signed-in session.
+
+    :param headers: The request headers, including the login cookie.
+    :param language: The language to use for the request.
+    :param user: The (brand account) user to send the request on behalf of.
+    """
+
+    def _is_session_authenticated() -> bool:
+        ytm = ytmusicapi.YTMusic(auth=headers, language=language, user=user)
+        try:
+            account_info = ytm.get_account_info()
+        except KeyError, YTMusicError:
+            # a signed-out session simply returns the anonymous account menu,
+            # which ytmusicapi is unable to parse
+            return False
+        return bool(account_info.get("accountName"))
+
+    return await asyncio.to_thread(_is_session_authenticated)
+
+
+def shorten_error(err: Exception, max_length: int = MAX_ERROR_LENGTH) -> str:
+    """
+    Return a shortened description of a (potentially huge) ytmusicapi error.
+
+    :param err: The error raised by ytmusicapi.
+    :param max_length: The maximum length of the returned description.
+    """
+    error_str = str(err)
+    if len(error_str) <= max_length:
+        return error_str
+    return f"{error_str[:max_length]}... (truncated)"
+
 
 async def get_artist(
     prov_artist_id: str, headers: dict[str, str], language: str = "en"

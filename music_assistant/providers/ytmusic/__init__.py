@@ -86,10 +86,12 @@ from .helpers import (
     get_song_radio_tracks,
     get_track,
     is_brand_account,
+    is_session_authenticated,
     library_add_remove_album,
     library_add_remove_artist,
     library_add_remove_playlist,
     search,
+    shorten_error,
 )
 
 if TYPE_CHECKING:
@@ -134,6 +136,14 @@ YT_PERSONAL_PLAYLISTS = (
 )
 DYNAMIC_PLAYLIST_TRACK_LIMIT = 300
 YTM_PREMIUM_CHECK_TRACK_ID = "dQw4w9WgXcQ"
+# YTM does not return an error for a signed-out session: it simply serves the anonymous
+# variant of the response, so an empty library or an unparsable response is all we get.
+SIGNED_OUT_ERROR = (
+    "The YouTube Music session is no longer signed in, "
+    "the stored login cookie is expired or has been revoked. "
+    "Grab a fresh cookie from a signed-in YouTube Music session "
+    "and update it in the provider settings."
+)
 PACKAGES_TO_INSTALL = ("yt-dlp[default]", "bgutil-ytdlp-pot-provider")
 DEFAULT_STREAM_URL_EXPIRATION = 3600  # 1 hour
 
@@ -207,6 +217,12 @@ class YoutubeMusicProvider(RecommendationPayloadMixin, MusicProvider):
                 break
         else:
             self.language = "en"
+        # verify the session before the premium check: a signed-out session also fails
+        # the premium check, which would report a misleading error to the user
+        if not await is_session_authenticated(
+            headers=self._headers, language=self.language, user=self._yt_user
+        ):
+            raise LoginFailed(SIGNED_OUT_ERROR)
         if not await self._user_has_ytm_premium():
             raise LoginFailed("User does not have Youtube Music Premium")
 
@@ -278,6 +294,8 @@ class YoutubeMusicProvider(RecommendationPayloadMixin, MusicProvider):
         artists_obj = await get_library_artists(
             headers=self._headers, language=self.language, user=self._yt_user
         )
+        if not artists_obj:
+            await self._verify_session()
         for artist in artists_obj:
             yield self._parse_artist(artist)
 
@@ -286,6 +304,8 @@ class YoutubeMusicProvider(RecommendationPayloadMixin, MusicProvider):
         albums_obj = await get_library_albums(
             headers=self._headers, language=self.language, user=self._yt_user
         )
+        if not albums_obj:
+            await self._verify_session()
         for album in albums_obj:
             yield self._parse_album(album, album["browseId"])
 
@@ -294,6 +314,8 @@ class YoutubeMusicProvider(RecommendationPayloadMixin, MusicProvider):
         playlists_obj = await get_library_playlists(
             headers=self._headers, language=self.language, user=self._yt_user
         )
+        if not playlists_obj:
+            await self._verify_session()
         for playlist in playlists_obj:
             playlist_id = playlist["id"]
             if playlist_id in YT_PERSONAL_PODCAST_PLAYLISTS:
@@ -305,6 +327,8 @@ class YoutubeMusicProvider(RecommendationPayloadMixin, MusicProvider):
         tracks_obj = await get_library_tracks(
             headers=self._headers, language=self.language, user=self._yt_user
         )
+        if not tracks_obj:
+            await self._verify_session()
         for track in tracks_obj:
             # Library tracks sometimes do not have a valid artist id
             # In that case, call the API for track details based on track id
@@ -319,6 +343,8 @@ class YoutubeMusicProvider(RecommendationPayloadMixin, MusicProvider):
         podcasts_obj = await get_library_podcasts(
             headers=self._headers, language=self.language, user=self._yt_user
         )
+        if not podcasts_obj:
+            await self._verify_session()
         for podcast in podcasts_obj:
             podcast_id = podcast.get("podcastId")
             if podcast_id in YT_PERSONAL_PODCAST_PLAYLISTS:
@@ -395,13 +421,22 @@ class YoutubeMusicProvider(RecommendationPayloadMixin, MusicProvider):
             # Personal playlists are dynamic and can result in endless tracks
             # limit to avoid memory issues
             limit = DYNAMIC_PLAYLIST_TRACK_LIMIT
-        if playlist_obj := await get_playlist(
-            prov_playlist_id=prov_playlist_id,
-            headers=self._headers,
-            language=self.language,
-            user=self._yt_user,
-            limit=limit,
-        ):
+        try:
+            playlist_obj = await get_playlist(
+                prov_playlist_id=prov_playlist_id,
+                headers=self._headers,
+                language=self.language,
+                user=self._yt_user,
+                limit=limit,
+            )
+        except KeyError as err:
+            # ytmusicapi raises a KeyError (with the entire response attached) whenever it
+            # can not find an expected key in the response, which is what a signed-out
+            # session gets served for a personal playlist such as the liked songs.
+            await self._verify_session()
+            msg = f"Could not load playlist {prov_playlist_id}: {shorten_error(err)}"
+            raise MediaNotFoundError(msg) from err
+        if playlist_obj:
             return self._parse_playlist(playlist_obj)
         msg = f"Item {prov_playlist_id} not found"
         raise MediaNotFoundError(msg)
@@ -432,8 +467,13 @@ class YoutubeMusicProvider(RecommendationPayloadMixin, MusicProvider):
                 user=self._yt_user,
                 limit=limit,
             )
-        except KeyError as ke:
-            self.logger.warning("Could not load playlist: %s: %s", prov_playlist_id, ke)
+        except KeyError as err:
+            # a signed-out session is served a response that ytmusicapi can not parse,
+            # so verify (and report) that before we treat this as an empty playlist
+            await self._verify_session()
+            self.logger.warning(
+                "Could not load playlist: %s: %s", prov_playlist_id, shorten_error(err)
+            )
             return []
         if "tracks" not in playlist_obj:
             return []
@@ -790,6 +830,18 @@ class YoutubeMusicProvider(RecommendationPayloadMixin, MusicProvider):
         )
         return mixed_for_you_folder
 
+    async def _verify_session(self) -> None:
+        """Verify that the session is still signed in, unload the provider if it is not."""
+        if await is_session_authenticated(
+            headers=self._headers, language=self.language, user=self._yt_user
+        ):
+            return
+        err = LoginFailed(SIGNED_OUT_ERROR)
+        if self.available:
+            # flag the provider as needing (re)authentication so the user can act on it
+            self.unload_with_error(err)
+        raise err
+
     async def _post_data(self, endpoint: str, data: dict[str, str], **kwargs: Any) -> Any:
         """Post data to the given endpoint."""
         url = f"{YTM_BASE_URL}{endpoint}"
@@ -818,6 +870,9 @@ class YoutubeMusicProvider(RecommendationPayloadMixin, MusicProvider):
             "Accept-Language": "en-US,en;q=0.5",
             "Content-Type": "application/json",
             "X-Goog-AuthUser": "0",
+            # the SAPISIDHASH below is bound to the origin, which Google reads from the
+            # origin header (with x-origin as fallback) - send both, just like the web client
+            "origin": YTM_DOMAIN,
             "x-origin": YTM_DOMAIN,
             "Cookie": self._cookie,
         }
