@@ -29,6 +29,15 @@ DASHBOARD_KEEPALIVE_SUFFIXES = ("/dashboard-keepalive.mp4", "/keepalive.png")
 # passive multichannel endpoint that should be removed from the setup.
 MULTICHANNEL_RECHECK_INTERVAL = 600
 
+# Highest sample rate/bit depth that is safe to assume for any Cast device;
+# also the cutoff above which a playback failure warning suggests lowering them.
+SAFE_MAX_SAMPLE_RATE = 48000
+SAFE_MAX_BIT_DEPTH = 16
+
+# Minimum interval (seconds) between playback failure warnings per player, so a
+# reconnect storm after a device crash logs the diagnosis once instead of repeating it.
+PLAYBACK_FAILURE_WARN_INTERVAL = 300
+
 # Devices known to not work with the Sendspin Cast bridge.
 # Tuple of (manufacturer, model) where "*" is a wildcard.
 # These devices will not get a Sendspin bridge, allowing other protocols
@@ -58,14 +67,14 @@ CAST_PLAYER_CONFIG_ENTRIES = (
 CONF_ENTRY_SAMPLE_RATES_CAST = create_sample_rates_config_entry(
     max_sample_rate=192000,
     max_bit_depth=24,
-    safe_max_sample_rate=48000,
-    safe_max_bit_depth=16,
+    safe_max_sample_rate=SAFE_MAX_SAMPLE_RATE,
+    safe_max_bit_depth=SAFE_MAX_BIT_DEPTH,
 )
 CONF_ENTRY_SAMPLE_RATES_CAST_GROUP = create_sample_rates_config_entry(
     max_sample_rate=96000,
     max_bit_depth=24,
-    safe_max_sample_rate=48000,
-    safe_max_bit_depth=16,
+    safe_max_sample_rate=SAFE_MAX_SAMPLE_RATE,
+    safe_max_bit_depth=SAFE_MAX_BIT_DEPTH,
 )
 
 # Measured defaults for known Cast models.

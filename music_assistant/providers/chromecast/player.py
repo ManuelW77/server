@@ -23,7 +23,11 @@ from music_assistant_models.player import PlayerSource
 from pychromecast import IDLE_APP_ID
 from pychromecast.controllers.media import MEDIA_PLAYER_STATE_BUFFERING, STREAM_TYPE_LIVE
 from pychromecast.controllers.multizone import MultizoneController
-from pychromecast.socket_client import CONNECTION_STATUS_CONNECTED, CONNECTION_STATUS_DISCONNECTED
+from pychromecast.socket_client import (
+    CONNECTION_STATUS_CONNECTED,
+    CONNECTION_STATUS_DISCONNECTED,
+    CONNECTION_STATUS_LOST,
+)
 
 from music_assistant.constants import MASS_LOGO_ONLINE, VERBOSE_LOG_LEVEL
 from music_assistant.helpers.util import is_valid_mac_address
@@ -38,6 +42,9 @@ from .constants import (
     CONF_USE_MASS_APP,
     DASHBOARD_KEEPALIVE_SUFFIXES,
     MASS_APP_ID,
+    PLAYBACK_FAILURE_WARN_INTERVAL,
+    SAFE_MAX_BIT_DEPTH,
+    SAFE_MAX_SAMPLE_RATE,
     SENDSPIN_CAST_APP_ID,
 )
 from .helpers import CastStatusListener, ChromecastInfo
@@ -83,6 +90,7 @@ class ChromecastPlayer(Player):
         self.on_app_status_changed: Callable[[str | None], None] | None = None
         self.last_poll = 0.0
         self.last_multichannel_check = 0.0
+        self._last_playback_failure_warning: float | None = None
         self.flow_meta_checksum: str | None = None
         # set static variables
         self._attr_supported_features = {
@@ -553,6 +561,18 @@ class ChromecastPlayer(Player):
             self.update_state()
             return
 
+        # the device ending an active media session with idle reason ERROR means it
+        # could not handle the stream (e.g. a decode failure), not that MA stopped it
+        if (
+            status.player_is_idle
+            and status.idle_reason == "ERROR"
+            and group_player is None
+            and self._attr_playback_state == PlaybackState.PLAYING
+        ):
+            self._warn_device_playback_failure(
+                f"Playback on {self.display_name} stopped because the device reported a media error"
+            )
+
         # player state
         # pychromecast reports BUFFERING as 'playing', so a Cast group that underruns the
         # LIVE flow stream at EOF never goes idle. Treat that case as idle so the queue
@@ -645,6 +665,18 @@ class ChromecastPlayer(Player):
             status.status,
         )
 
+        # losing the connection in the middle of playback points at the device's
+        # Cast receiver going down, rather than a regular disconnect
+        if (
+            status.status in (CONNECTION_STATUS_DISCONNECTED, CONNECTION_STATUS_LOST)
+            and self.active_cast_group is None
+            and self._attr_playback_state == PlaybackState.PLAYING
+        ):
+            self._warn_device_playback_failure(
+                f"Lost the connection to {self.display_name} during playback; "
+                "the device's Cast receiver has probably crashed or restarted"
+            )
+
         if status.status == CONNECTION_STATUS_DISCONNECTED:
             self._attr_available = False
             self.update_state()
@@ -723,3 +755,35 @@ class ChromecastPlayer(Player):
         # player that owns the queue. Only a native/standalone Cast owns its own queue.
         queue_id = self.active_cast_group or self.protocol_parent_id or self.player_id
         return self.mass.player_queues.flow_stream_finished(queue_id)
+
+    def _warn_device_playback_failure(self, message: str) -> None:
+        """
+        Log a warning about the device unexpectedly ending playback.
+
+        :param message: Description of the failure, without trailing punctuation.
+        """
+        now = time.monotonic()
+        if (
+            self._last_playback_failure_warning is not None
+            and (now - self._last_playback_failure_warning) < PLAYBACK_FAILURE_WARN_INTERVAL
+        ):
+            return
+        self._last_playback_failure_warning = now
+        # when the player is configured beyond the safe sample rate/bit depth,
+        # point at that setting as the most likely cause
+        hires_rates = [
+            (sample_rate, bit_depth)
+            for sample_rate, bit_depth in self.get_supported_sample_rates()
+            if sample_rate > SAFE_MAX_SAMPLE_RATE or bit_depth > SAFE_MAX_BIT_DEPTH
+        ]
+        if not hires_rates:
+            self.logger.warning("%s.", message)
+            return
+        self.logger.warning(
+            "%s. This player is configured to allow audio up to %g kHz/%d bit, "
+            "which not all Cast devices can sustain. If playback keeps failing on "
+            "this device, lower the allowed sample rates in the player settings.",
+            message,
+            max(sample_rate for sample_rate, _ in hires_rates) / 1000,
+            max(bit_depth for _, bit_depth in hires_rates),
+        )
