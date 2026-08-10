@@ -374,6 +374,12 @@ class SyncGroupPlayer(Player):
         to stay formed across stops can assign Fake power control and use that
         to pin the group as 'active'.
         """
+        self.logger.debug(
+            "Stop command for syncgroup %s, sync_leader=%s, powered=%s",
+            self.display_name,
+            self.sync_leader.display_name if self.sync_leader else None,
+            self._attr_powered,
+        )
         self._cancel_idle_grace_timer()
         # an explicit stop also voids any pending debounced re-form and the
         # startup marker — the user asked for silence
@@ -388,6 +394,10 @@ class SyncGroupPlayer(Player):
         # via Fake power control — they expect the group to stay 'active' until
         # they power it off, even after a stop.
         if self._attr_powered is True:
+            self.logger.debug(
+                "Keeping syncgroup %s formed after stop, group is powered on",
+                self.display_name,
+            )
             return
         await self._dissolve_syncgroup()
 
@@ -697,6 +707,20 @@ class SyncGroupPlayer(Player):
         members_to_sync = [
             x for x in self._attr_group_members if x != leader.player_id and x not in already_synced
         ]
+        # players the leader holds that are not ours: a leftover of another session
+        # on this leader, which will play along with this group once we start
+        foreign_members = [
+            x for x in already_synced if x != leader.player_id and x not in self._attr_group_members
+        ]
+        self.logger.debug(
+            "Syncing members for syncgroup %s on sync leader %s: "
+            "already_synced=%s, to_sync=%s, not_ours=%s",
+            self.display_name,
+            leader.display_name,
+            sorted(already_synced),
+            members_to_sync,
+            foreign_members,
+        )
         if members_to_sync:
             # If the sync leader is playing something independently, stop it first
             # to prevent protocol switching from trying to resume the previous playback
@@ -762,6 +786,12 @@ class SyncGroupPlayer(Player):
             sync_children = [
                 x for x in sync_leader.state.group_members if x != sync_leader.player_id
             ]
+            self.logger.debug(
+                "Dissolving syncgroup %s, sync_leader=%s, ungrouping=%s",
+                self.display_name,
+                sync_leader.display_name,
+                sync_children,
+            )
             if sync_children:
                 # wait for the leader's state to reflect the ungroup
                 # use _handle_set_members directly to avoid the redirect loop
@@ -775,6 +805,8 @@ class SyncGroupPlayer(Player):
                     await self.mass.players._handle_set_members(
                         sync_leader, player_ids_to_remove=sync_children
                     )
+        else:
+            self.logger.debug("Dissolving syncgroup %s, no sync leader set", self.display_name)
         # Clear the leader's active protocol once it stops playing; the controller's
         # clearing in _handle_cmd_stop is skipped for a still-grouped protocol player.
         if sync_leader:
@@ -1266,6 +1298,9 @@ class SyncGroupPlayer(Player):
         """Cancel any pending idle-grace dissolve task."""
         if self._idle_grace_task is not None:
             if not self._idle_grace_task.done():
+                self.logger.debug(
+                    "Cancelling pending idle-grace dissolve for syncgroup %s", self.display_name
+                )
                 self._idle_grace_task.cancel()
             self._idle_grace_task = None
 
@@ -1280,10 +1315,22 @@ class SyncGroupPlayer(Player):
         # us already. Any of these means we should not dissolve here.
         self._idle_grace_task = None
         if self.sync_leader is None:
+            self.logger.debug(
+                "Idle-grace expired for syncgroup %s, already dissolved", self.display_name
+            )
             return
         if self._attr_powered is True:
+            self.logger.debug(
+                "Idle-grace expired for syncgroup %s, group is powered on", self.display_name
+            )
             return
         if self.sync_leader.state.playback_state != PlaybackState.IDLE:
+            self.logger.debug(
+                "Idle-grace expired for syncgroup %s, sync leader %s is %s",
+                self.display_name,
+                self.sync_leader.display_name,
+                self.sync_leader.state.playback_state,
+            )
             return
         self.logger.info(
             "Idle-grace expired for syncgroup %s, dissolving",

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
 import weakref
 from collections.abc import AsyncIterator
@@ -57,6 +58,7 @@ from music_assistant_models.player import PlayerOptionValueType  # noqa: TC002
 from music_assistant_models.player_control import PlayerControl  # noqa: TC002
 
 from music_assistant.constants import (
+    ATTR_ACTIVE_GROUP,
     ATTR_ACTIVE_SOURCE,
     ATTR_ANNOUNCEMENT_IN_PROGRESS,
     ATTR_AVAILABLE,
@@ -73,6 +75,7 @@ from music_assistant.constants import (
     ATTR_POWERED,
     ATTR_PREVIOUS_VOLUME,
     ATTR_SUPPORTED_FEATURES,
+    ATTR_SYNCED_TO,
     ATTR_VOLUME_CONTROL,
     CONF_AUTO_PLAY,
     CONF_CACHED_ARP_MAC,
@@ -1012,6 +1015,13 @@ class PlayerController(AnnouncementsMixin, ProtocolLinkingMixin, CoreController)
                     True,
                 )
             )
+            self.logger.debug(
+                "Play media on captured player %s: synced_to=%s, active_group=%s, overrides=%s",
+                target_player.state.name,
+                target_player.state.synced_to,
+                target_player.state.active_group,
+                override,
+            )
             if override:
                 await self._release_player_for_play_media(target_player)
                 async with self.get_player_lock(
@@ -1168,6 +1178,17 @@ class PlayerController(AnnouncementsMixin, ProtocolLinkingMixin, CoreController)
         """
         parent_player: Player | None = self.get_player(target_player, True)
         assert parent_player is not None  # for type checking
+        # this command is not routed through handle_player_command, so attribute the
+        # caller here: it is the only way to tell an external join/unjoin (automation,
+        # voice assistant, second client) apart from one we issued ourselves
+        current_user = get_current_user()
+        self.logger.debug(
+            "Handling command set_members for player %s (%s), adding=%s, removing=%s",
+            parent_player.display_name,
+            f"by user {current_user.username}" if current_user else "unauthenticated",
+            player_ids_to_add,
+            player_ids_to_remove,
+        )
         if PlayerFeature.SET_MEMBERS not in parent_player.state.supported_features:
             msg = f"Player {parent_player.name} does not support group commands"
             raise UnsupportedFeaturedException(msg)
@@ -1738,6 +1759,14 @@ class PlayerController(AnnouncementsMixin, ProtocolLinkingMixin, CoreController)
             # current_media's corrected position jumped (seek or buffer correction
             # reached the current media): emit the full player update below so
             # consumers see the fresh position
+
+        # ownership changes decide which group (and therefore which queue) a player
+        # follows, so they are logged with their values instead of only as a field name
+        for attr in (ATTR_ACTIVE_GROUP, ATTR_SYNCED_TO):
+            if (change := changed_values.get(attr)) is not None:
+                self.logger.debug(
+                    "%s for %s changed from %s to %s", attr, player.name, change[0], change[1]
+                )
 
         if self.logger.isEnabledFor(VERBOSE_LOG_LEVEL):
             self.logger.log(
@@ -3535,6 +3564,7 @@ class PlayerController(AnnouncementsMixin, ProtocolLinkingMixin, CoreController)
             and player_state.active_source in (None, player_id)
             and not player.extra_data.get(ATTR_ANNOUNCEMENT_IN_PROGRESS)
         ):
+            self.logger.debug("Auto play on power on triggered for %s", player_state.name)
             await self.mass.player_queues.resume(player_id)
 
     async def _handle_cmd_volume_set(self, player_id: str, volume_level: int) -> None:
@@ -3767,6 +3797,18 @@ class PlayerController(AnnouncementsMixin, ProtocolLinkingMixin, CoreController)
         # set active source if media has a source_id (e.g. plugin source or mass queue source)
         if media.source_id:
             player.set_active_mass_source(media.source_id)
+
+        if self.logger.isEnabledFor(logging.DEBUG):
+            # the queue a player follows is derived from its active group, so log both:
+            # a mismatch with the requested source means the player is owned elsewhere
+            active_queue = self.get_active_queue(player)
+            self.logger.debug(
+                "Play media on %s: source=%s, active_group=%s, active_queue=%s",
+                player.state.name,
+                media.source_id,
+                player.state.active_group,
+                active_queue.queue_id if active_queue else None,
+            )
 
         # Determine output protocol to use:
         # While a session is active (playing/paused), keep using the already active
