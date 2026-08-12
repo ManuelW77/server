@@ -13,6 +13,7 @@ from music_assistant_models.errors import InvalidDataError
 
 from music_assistant.providers.ai_radio import storage as storage_module
 from music_assistant.providers.ai_radio.constants import DEFAULT_LLM_INSTRUCTIONS
+from music_assistant.providers.ai_radio.helpers import resolve_station_language
 from music_assistant.providers.ai_radio.storage import AIRadioStorageMixin
 
 
@@ -64,6 +65,7 @@ def test_normalize_general_uses_known_schema_only() -> None:
     storage = DummyStorage()
     raw_general = {
         "instructions": "Keep it concise and conversational.",
+        "language": "fr-CA",
         "weather_provider": "open_meteo",
         "weather_timeout_seconds": "30",
         # timezone/location moved to provider config; a legacy station carrying them
@@ -76,6 +78,7 @@ def test_normalize_general_uses_known_schema_only() -> None:
     normalized = storage._normalize_general(raw_general)
 
     assert normalized["instructions"] == "Keep it concise and conversational."
+    assert normalized["language"] == "fr-CA"
     assert normalized["weather_timeout_seconds"] == 30
     assert "foo" not in normalized
     assert "timezone" not in normalized
@@ -355,6 +358,42 @@ def test_load_stations_does_not_persist_invalid_default_station(tmp_path: Any) -
         parsed = json.loads(storage._stations_file.read_text())
         for station in parsed.get("stations", []):
             assert station.get("source_playlist_id") != ""
+
+
+def test_resolve_station_language_preserves_full_locale_and_override_state() -> None:
+    """Resolve a full MA locale for inheritance and identify station overrides."""
+    metadata = type("Metadata", (), {"locale": "pt_PT"})()
+
+    assert resolve_station_language({}, metadata) == ("pt-PT", False)
+    assert resolve_station_language({"general": {"language": "zh_hant_tw"}}, metadata) == (
+        "zh-Hant-TW",
+        True,
+    )
+
+
+def test_normalize_general_canonicalizes_language_tags() -> None:
+    """Normalize underscore locale input and conventional language-tag casing."""
+    storage = DummyStorage()
+
+    assert storage._normalize_general({"language": "fr_ca"})["language"] == "fr-CA"
+    assert storage._normalize_general({"language": "ZH_hant_tw"})["language"] == "zh-Hant-TW"
+
+
+@pytest.mark.parametrize("language", ["not a language", "en--US", "123", "en-US-toolongtag"])
+def test_normalize_general_rejects_invalid_language_tags(language: str) -> None:
+    """Reject malformed tags before they reach a TTS engine at airtime."""
+    storage = DummyStorage()
+
+    with pytest.raises(InvalidDataError, match="language"):
+        storage._normalize_general({"language": language})
+
+
+def test_normalize_general_defaults_language_to_instance_preference() -> None:
+    """A missing or blank language remains an explicit inherit marker."""
+    storage = DummyStorage()
+
+    assert storage._normalize_general({})["language"] == ""
+    assert storage._normalize_general({"language": "  "})["language"] == ""
 
 
 def test_normalize_general_replaces_null_instructions_with_default() -> None:

@@ -20,6 +20,8 @@ from music_assistant_models.streamdetails import StreamDetails
 from music_assistant.helpers.tags import async_parse_tags
 
 from .constants import (
+    ATTR_LANGUAGE,
+    ATTR_LANGUAGE_OVERRIDE,
     ATTR_MAX_CHARS,
     ATTR_PROMPT,
     ATTR_RENDERED_TEXT,
@@ -63,6 +65,11 @@ class AIRadioRenderMixin:
         queue_item = self._find_clip_item(item_id)
         if queue_item is None:
             raise MediaNotFoundError(f"AI Radio clip {item_id} is not in any queue")
+        try:
+            self._resolve_clip_language(queue_item.extra_attributes)
+        except InvalidDataError as err:
+            self._record_skip(queue_item, str(err))
+            raise MediaNotFoundError(f"AI Radio clip {item_id} has invalid render state") from err
         prompt = str(queue_item.extra_attributes.get(ATTR_PROMPT) or "")
         if not prompt:
             self._record_skip(queue_item, "clip has no prompt to render")
@@ -143,6 +150,12 @@ class AIRadioRenderMixin:
         """Resolve the deferred placeholders and generate the spoken script."""
         attributes = queue_item.extra_attributes
         station = self._stations.get(str(attributes.get(ATTR_STATION_ID) or "")) or {}
+        language, language_override = self._resolve_clip_language(attributes)
+        language_station = dict(station)
+        language_station["general"] = {
+            **cast("dict[str, Any]", station.get("general") or {}),
+            "language": language,
+        }
         deferred = await self._resolve_deferred_placeholders(station)
         resolved = prompt
         for key, value in deferred.items():
@@ -152,7 +165,12 @@ class AIRadioRenderMixin:
         try:
             text = cast(
                 "str",
-                await self._generate_text(station=station, prompt=resolved, web_mode=web_mode),
+                await self._generate_text(
+                    station=language_station,
+                    prompt=resolved,
+                    web_mode=web_mode,
+                    language_override=language_override,
+                ),
             )
         except Exception as err:
             self.logger.warning(
@@ -178,8 +196,9 @@ class AIRadioRenderMixin:
         self, queue_item: QueueItem, text: str, clip_id: str
     ) -> tuple[str, StreamType, AudioFormat, int | None]:
         """Convert the script to playable audio via the configured TTS engine."""
+        language, _language_override = self._resolve_clip_language(queue_item.extra_attributes)
         try:
-            path, stream_type, audio_format = await self._render_tts_media(text)
+            path, stream_type, audio_format = await self._render_tts_media(text, language=language)
             # the probe is the first fetch, so a failed render surfaces here and not in playback
             duration = await self._probe_duration(path)
             return path, stream_type, audio_format, duration
@@ -188,12 +207,26 @@ class AIRadioRenderMixin:
             self._record_skip(queue_item, f"TTS failed: {err}")
             raise MediaNotFoundError(f"AI Radio clip {clip_id} failed TTS") from err
 
-    async def _render_tts_media(self, text: str) -> tuple[str, StreamType, AudioFormat]:
+    @staticmethod
+    def _resolve_clip_language(attributes: dict[str, Any]) -> tuple[str, bool]:
+        """Return the immutable language snapshot carried by a queued clip."""
+        if ATTR_LANGUAGE not in attributes or ATTR_LANGUAGE_OVERRIDE not in attributes:
+            raise InvalidDataError("AI Radio clip has no language snapshot")
+        language = str(attributes[ATTR_LANGUAGE] or "").strip()
+        if not language:
+            raise InvalidDataError("AI Radio clip has an empty language snapshot")
+        return language, bool(attributes[ATTR_LANGUAGE_OVERRIDE])
+
+    async def _render_tts_media(
+        self, text: str, language: str | None = None
+    ) -> tuple[str, StreamType, AudioFormat]:
         """Ask the TTS engine for audio and return the path, stream type and format to play it."""
         engine = await self._get_tts_engine()
         try:
             async with asyncio.timeout(TTS_QUERY_TIMEOUT_SECONDS) as query_timeout:
-                stream_details = await engine.provider.get_tts_message(text, engine_id=engine.id)
+                stream_details = await engine.provider.get_tts_message(
+                    text, language=language, engine_id=engine.id
+                )
         except TimeoutError as err:
             # expired() tells our own cap apart from a timeout raised inside the engine
             if not query_timeout.expired():

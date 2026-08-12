@@ -23,7 +23,7 @@ from .constants import (
     EMPTY_SECTION_ID,
     VALID_WEB_SEARCH_MODES,
 )
-from .helpers import slugify
+from .helpers import normalize_language_tag, slugify
 
 _slugify = slugify
 
@@ -223,6 +223,7 @@ class AIRadioStorageMixin:
 
         return {
             "instructions": str(source_general.get("instructions") or defaults["instructions"]),
+            "language": normalize_language_tag(source_general.get("language")),
             "weather_provider": _text("weather_provider"),
             "weather_timeout_seconds": _int("weather_timeout_seconds"),
         }
@@ -508,6 +509,7 @@ class AIRadioStorageMixin:
             "merge_section_id": "Between_Songs_Smoother",
             "general": {
                 "instructions": DEFAULT_LLM_INSTRUCTIONS,
+                "language": "",
                 "weather_provider": DEFAULT_WEATHER_PROVIDER,
                 "weather_timeout_seconds": DEFAULT_WEATHER_TIMEOUT_SECONDS,
             },

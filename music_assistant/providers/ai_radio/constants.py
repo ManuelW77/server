@@ -69,6 +69,8 @@ WEB_SEARCH_MODE_RANK = {"disabled": 0, "allow": 1, "force": 2}
 # extra_attributes is serialized to clients and persisted with the queue.
 ATTR_SESSION_ID = "ai_radio_session_id"
 ATTR_STATION_ID = "ai_radio_station_id"
+ATTR_LANGUAGE = "ai_radio_language"
+ATTR_LANGUAGE_OVERRIDE = "ai_radio_language_override"
 ATTR_PROMPT = "ai_radio_prompt"
 ATTR_MAX_CHARS = "ai_radio_max_chars"
 ATTR_WEB_SEARCH_MODE = "ai_radio_web_search_mode"

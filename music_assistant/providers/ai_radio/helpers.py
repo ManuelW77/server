@@ -6,7 +6,7 @@ import random
 import re
 from typing import Any
 
-from music_assistant_models.errors import MusicAssistantError
+from music_assistant_models.errors import InvalidDataError, MusicAssistantError
 
 from music_assistant.helpers.datetime import utc
 
@@ -30,6 +30,37 @@ def slugify(value: str) -> str:
 def is_empty_section(section_id: str) -> bool:
     """Return True when this section acts as a no-op marker."""
     return section_id.strip().upper() == EMPTY_SECTION_ID
+
+
+def normalize_language_tag(value: Any) -> str:
+    """Return a canonical language tag, or an empty string for inheritance."""
+    language = str(value or "").strip().replace("_", "-")
+    if not language:
+        return ""
+    parts = language.split("-")
+    if not re.fullmatch(r"[A-Za-z]{2,3}", parts[0]):
+        raise InvalidDataError(f"Invalid AI Radio language tag: {value!r}")
+    normalized = [parts[0].lower()]
+    index = 1
+    if index < len(parts) and re.fullmatch(r"[A-Za-z]{4}", parts[index]):
+        normalized.append(parts[index].title())
+        index += 1
+    if index < len(parts) and re.fullmatch(r"(?:[A-Za-z]{2}|[0-9]{3})", parts[index]):
+        normalized.append(parts[index].upper())
+        index += 1
+    for variant in parts[index:]:
+        if not re.fullmatch(r"[A-Za-z0-9]{1,8}", variant):
+            raise InvalidDataError(f"Invalid AI Radio language tag: {value!r}")
+        normalized.append(variant.lower())
+    return "-".join(normalized)
+
+
+def resolve_station_language(station: dict[str, Any], metadata: Any) -> tuple[str, bool]:
+    """Return the best-effort TTS language and whether the station set as an override it."""
+    general = station.get("general")
+    if isinstance(general, dict) and (language := normalize_language_tag(general.get("language"))):
+        return language, True
+    return normalize_language_tag(getattr(metadata, "locale", "")), False
 
 
 def track_songinfo(track: dict[str, Any] | None) -> str:

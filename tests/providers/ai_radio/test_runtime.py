@@ -26,6 +26,8 @@ from music_assistant_models.media_items import ProviderMapping, Track
 from music_assistant.helpers.datetime import now as host_now
 from music_assistant.models.plugin import AIEngine, PluginProvider, TTSEngine
 from music_assistant.providers.ai_radio.constants import (
+    ATTR_LANGUAGE,
+    ATTR_LANGUAGE_OVERRIDE,
     ATTR_MAX_CHARS,
     ATTR_PROMPT,
     ATTR_SESSION_ID,
@@ -418,15 +420,17 @@ async def test_generate_text_reports_an_engine_side_timeout_as_a_query_failure()
     assert "query failed: TimeoutError" in str(error.value)
 
 
-async def test_generate_text_asks_for_the_system_locale_language() -> None:
-    """The AI query states the server locale so sections are written in that language."""
+async def test_generate_text_asks_for_the_inherited_instance_language() -> None:
+    """A station without an override asks the AI for MA's preferred language."""
     plugin = _create_ai_plugin("hass_1", "ai_task.default")
     plugin.ai_query = AsyncMock(return_value="section text")
     runtime = DummyRuntime({CONF_AI_ENGINE: "hass_1/ai_task.default"})
     _set_runtime_mass(
         runtime,
         _create_engine_mass(
-            ProviderFeature.AI_QUERY, plugin, metadata=SimpleNamespace(locale="nl_NL")
+            ProviderFeature.AI_QUERY,
+            plugin,
+            metadata=SimpleNamespace(locale="nl_NL", preferred_language="nl"),
         ),
     )
 
@@ -436,8 +440,60 @@ async def test_generate_text_asks_for_the_system_locale_language() -> None:
         web_mode="disabled",
     )
 
-    assert "nl_NL" in plugin.ai_query.await_args.args[0]
+    assert "language 'nl-NL'" in plugin.ai_query.await_args.args[0]
     assert plugin.ai_query.await_args.kwargs == {"engine_id": "ai_task.default"}
+
+
+async def test_generate_text_keeps_inherited_language_as_an_overridable_default() -> None:
+    """Legacy program instructions may still override an inherited MA language."""
+    plugin = _create_ai_plugin("hass_1", "ai_task.default")
+    plugin.ai_query = AsyncMock(return_value="section text")
+    runtime = DummyRuntime({CONF_AI_ENGINE: "hass_1/ai_task.default"})
+    _set_runtime_mass(
+        runtime,
+        _create_engine_mass(
+            ProviderFeature.AI_QUERY,
+            plugin,
+            metadata=SimpleNamespace(locale="nl_NL", preferred_language="nl"),
+        ),
+    )
+
+    await runtime._generate_text(
+        station={"general": {"instructions": "Write in French.", "language": "nl-NL"}},
+        prompt="test prompt",
+        web_mode="disabled",
+        language_override=False,
+    )
+
+    query = plugin.ai_query.await_args.args[0]
+    assert "Unless the program instructions ask for another language" in query
+    assert "nl-NL" in query
+
+
+async def test_generate_text_asks_for_the_station_language_override() -> None:
+    """An station language override controls the language requested from the AI."""
+    plugin = _create_ai_plugin("hass_1", "ai_task.default")
+    plugin.ai_query = AsyncMock(return_value="section text")
+    runtime = DummyRuntime({CONF_AI_ENGINE: "hass_1/ai_task.default"})
+    _set_runtime_mass(
+        runtime,
+        _create_engine_mass(
+            ProviderFeature.AI_QUERY,
+            plugin,
+            metadata=SimpleNamespace(locale="nl_NL", preferred_language="nl"),
+        ),
+    )
+
+    await runtime._generate_text(
+        station={"general": {"instructions": "test", "language": "fr-CA"}},
+        prompt="test prompt",
+        web_mode="disabled",
+    )
+
+    query = plugin.ai_query.await_args.args[0]
+    assert "Write the output in the language 'fr-CA'" in query
+    assert "Unless the program instructions ask for another language" not in query
+    assert "language 'nl'" not in query
 
 
 @pytest.mark.parametrize("general", [{"instructions": "Host personality: minimal DJ."}, {}])
@@ -626,10 +682,38 @@ def _stub_track(item_id: str) -> Track:
     )
 
 
+def test_compose_queue_items_snapshots_explicit_station_language() -> None:
+    """Queued clips retain the station language selected when the run was composed."""
+    runtime = DummyRuntime()
+    _set_runtime_mass(runtime, SimpleNamespace(metadata=SimpleNamespace(locale="en_US")))
+    section = PlannedSection(
+        order=0,
+        clip_id="sess_000",
+        section_id="Intro",
+        section_name="Intro",
+        when="start_of_playlist",
+        insert_at_index=0,
+        prompt="hello",
+        max_chars=200,
+        web_search_mode="disabled",
+    )
+
+    items = runtime._compose_queue_items(
+        queue_id="player_a",
+        session=SessionState(session_id="sess", station_id="st"),
+        station={"id": "st", "general": {"language": "fr_CA"}},
+        tracks=[],
+        sections=[section],
+    )
+
+    assert items[0].extra_attributes[ATTR_LANGUAGE] == "fr-CA"
+    assert items[0].extra_attributes[ATTR_LANGUAGE_OVERRIDE] is True
+
+
 def test_compose_queue_items_places_clips_at_planned_indices() -> None:
     """Clips are interleaved at their planned indices, carrying their render state."""
     runtime = DummyRuntime()
-    _set_runtime_mass(runtime, SimpleNamespace())
+    _set_runtime_mass(runtime, SimpleNamespace(metadata=SimpleNamespace(locale="en_GB")))
     tracks = [
         {"index": 0, "uri": "library://track/1", "media_item": _stub_track("1")},
         {"index": 1, "uri": "library://track/2", "media_item": _stub_track("2")},
@@ -679,6 +763,8 @@ def test_compose_queue_items_places_clips_at_planned_indices() -> None:
     assert intro.extra_attributes[ATTR_PROMPT] == "hello <timestamp>"
     assert intro.extra_attributes[ATTR_SESSION_ID] == "sess"
     assert intro.extra_attributes[ATTR_STATION_ID] == "st"
+    assert intro.extra_attributes[ATTR_LANGUAGE] == "en-GB"
+    assert intro.extra_attributes[ATTR_LANGUAGE_OVERRIDE] is False
     assert intro.extra_attributes[ATTR_MAX_CHARS] == 200
     assert items[2].extra_attributes[ATTR_WEB_SEARCH_MODE] == "allow"
     # the section name travels as the item's own name, not as an attribute

@@ -22,6 +22,8 @@ from music_assistant_models.queue_item import QueueItem
 from music_assistant.helpers.tags import AudioTags
 from music_assistant.models.plugin import PluginProvider, TTSEngine
 from music_assistant.providers.ai_radio.constants import (
+    ATTR_LANGUAGE,
+    ATTR_LANGUAGE_OVERRIDE,
     ATTR_MAX_CHARS,
     ATTR_PROMPT,
     ATTR_RENDERED_TEXT,
@@ -47,28 +49,41 @@ class DummyRenderer(AIRadioRenderMixin):
             "st": {"id": "st", "general": {"instructions": "be warm"}}
         }
         self.llm_prompts: list[str] = []
+        self.llm_languages: list[str] = []
         self.tts_texts: list[str] = []
+        self.tts_languages: list[str | None] = []
         self.weather_calls = 0
         self.fail_generation = False
 
     def _configured_now(self) -> Any:
         return __import__("datetime").datetime(2026, 7, 30, 18, 30)
 
-    async def _generate_text(self, station: dict[str, Any], prompt: str, web_mode: str) -> str:
+    async def _generate_text(
+        self,
+        station: dict[str, Any],
+        prompt: str,
+        web_mode: str,
+        language_override: bool | None = None,
+    ) -> str:
         # a real suspension point so concurrent callers actually interleave under
         # asyncio.gather, otherwise the lock in get_stream_details is never exercised
         await asyncio.sleep(0)
         if self.fail_generation:
             raise RuntimeError("llm down")
         self.llm_prompts.append(prompt)
+        general = station.get("general") or {}
+        self.llm_languages.append(str(general.get("language") or ""))
         return "Good evening, it is warm out."
 
     async def _prepare_runtime_tokens(self, station: dict[str, Any]) -> dict[str, str]:
         self.weather_calls += 1
         return {"<weather_hourly>": f"fresh weather {self.weather_calls}"}
 
-    async def _render_tts_media(self, text: str) -> tuple[str, StreamType, AudioFormat]:
+    async def _render_tts_media(
+        self, text: str, language: str | None = None
+    ) -> tuple[str, StreamType, AudioFormat]:
         self.tts_texts.append(text)
+        self.tts_languages.append(language)
         return (
             f"http://ha.invalid/api/tts_proxy/{len(self.tts_texts)}.mp3",
             StreamType.HTTP,
@@ -85,9 +100,12 @@ class RealTtsRenderer(DummyRenderer):
     _render_tts_media = AIRadioRenderMixin._render_tts_media
 
 
-def _tts_renderer(path: str, audio_format: AudioFormat | None = None) -> RealTtsRenderer:
+def _tts_renderer(
+    path: str, audio_format: AudioFormat | None = None, language: str = ""
+) -> RealTtsRenderer:
     """Build a renderer whose TTS engine returns StreamDetails carrying the given path."""
     renderer = RealTtsRenderer()
+    renderer._stations["st"]["general"]["language"] = language
     plugin = MagicMock(spec=PluginProvider)
     plugin.instance_id = "hass_1"
     plugin.get_tts_message = AsyncMock(
@@ -105,6 +123,8 @@ def _clip_item(clip_id: str, queue_id: str = "player_a", **overrides: Any) -> Qu
     attributes: dict[str, Any] = {
         ATTR_SESSION_ID: "sess",
         ATTR_STATION_ID: "st",
+        ATTR_LANGUAGE: "en-US",
+        ATTR_LANGUAGE_OVERRIDE: False,
         ATTR_PROMPT: "It is <timestamp>. Weather: <weather_hourly>.",
         ATTR_MAX_CHARS: 300,
         ATTR_WEB_SEARCH_MODE: "disabled",
@@ -170,6 +190,47 @@ async def test_render_resolves_deferred_placeholders_at_render_time() -> None:
     assert streamdetails.expiration == 60
     assert streamdetails.can_seek is False
     assert streamdetails.allow_seek is False
+
+
+async def test_render_uses_snapshotted_language_after_station_changes() -> None:
+    """Station edits cannot change the AI or TTS language of an already queued clip."""
+    renderer = DummyRenderer()
+    item = _clip_item("sess_001")
+    item.extra_attributes.update({ATTR_LANGUAGE: "fr-CA", ATTR_LANGUAGE_OVERRIDE: True})
+    renderer._stations["st"]["general"]["language"] = "de-DE"
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert renderer.llm_languages == ["fr-CA"]
+    assert renderer.tts_languages == ["fr-CA"]
+
+
+async def test_render_uses_snapshotted_language_after_station_deletion_and_remint() -> None:
+    """Station deletion and URL reminting preserve the queued clip language."""
+    renderer = DummyRenderer()
+    item = _clip_item("sess_001")
+    item.extra_attributes.update({ATTR_LANGUAGE: "pt-BR", ATTR_LANGUAGE_OVERRIDE: True})
+    renderer._stations.clear()
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert renderer.llm_languages == ["pt-BR"]
+    assert renderer.tts_languages == ["pt-BR", "pt-BR"]
+
+
+async def test_render_forwards_the_inherited_language_to_tts() -> None:
+    """A rendered queue clip forwards MA's preferred language to the TTS boundary."""
+    renderer = DummyRenderer()
+    item = _clip_item("sess_001")
+    _attach_queue(renderer, [item])
+
+    await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+    assert renderer.tts_texts == ["Good evening, it is warm out."]
+    assert renderer.tts_languages == ["en-US"]
 
 
 async def test_render_caches_the_script_and_remints_the_url() -> None:
@@ -241,6 +302,23 @@ async def test_unknown_clip_raises_media_not_found() -> None:
         await renderer.get_stream_details("sess_999", MediaType.SOUND_EFFECT)
 
 
+async def test_clip_without_language_snapshot_raises_media_not_found() -> None:
+    """A malformed clip without immutable language state is rejected."""
+    renderer = DummyRenderer()
+    item = _clip_item("sess_001")
+    item.extra_attributes.pop(ATTR_LANGUAGE)
+    _attach_queue(renderer, [item])
+
+    with pytest.raises(MediaNotFoundError):
+        await renderer.get_stream_details("sess_001", MediaType.SOUND_EFFECT)
+
+
+def test_clip_language_snapshot_requires_both_attributes() -> None:
+    """The immutable language value and override marker form one required contract."""
+    with pytest.raises(InvalidDataError, match="language snapshot"):
+        DummyRenderer._resolve_clip_language({ATTR_LANGUAGE: "en-US"})
+
+
 async def test_clip_without_prompt_raises_media_not_found() -> None:
     """A clip whose attributes were lost is reported as missing media."""
     renderer = DummyRenderer()
@@ -281,7 +359,9 @@ async def test_tts_failure_raises_media_not_found_and_records_skip() -> None:
     """A TTS failure surfaces as missing media and is recorded on the owning session."""
 
     class UnspeakableRenderer(DummyRenderer):
-        async def _render_tts_media(self, text: str) -> tuple[str, StreamType, AudioFormat]:
+        async def _render_tts_media(
+            self, text: str, language: str | None = None
+        ) -> tuple[str, StreamType, AudioFormat]:
             raise RuntimeError("tts down")
 
     renderer = UnspeakableRenderer()
@@ -373,7 +453,21 @@ async def test_render_tts_media_streams_a_url_over_http() -> None:
     assert audio_format.content_type == ContentType.MP3
     engine = cast("Any", renderer)._get_tts_engine.return_value
     # the provider-scoped engine.id, never engine.uid, and never omitted
-    engine.provider.get_tts_message.assert_awaited_once_with("hello world", engine_id="tts.cloud")
+    engine.provider.get_tts_message.assert_awaited_once_with(
+        "hello world", language=None, engine_id="tts.cloud"
+    )
+
+
+async def test_render_tts_media_forwards_the_station_language() -> None:
+    """The resolved station language is sent to the selected TTS engine."""
+    renderer = _tts_renderer("http://example.test/bonjour.mp3", language="fr-CA")
+
+    await renderer._render_tts_media("bonjour", language="fr-CA")
+
+    engine = cast("Any", renderer)._get_tts_engine.return_value
+    engine.provider.get_tts_message.assert_awaited_once_with(
+        "bonjour", language="fr-CA", engine_id="tts.cloud"
+    )
 
 
 async def test_render_tts_media_streams_a_local_file_from_disk(tmp_path: Path) -> None:

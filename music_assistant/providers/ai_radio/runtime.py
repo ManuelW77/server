@@ -36,6 +36,8 @@ from music_assistant.helpers.uri import create_uri
 
 from .constants import (
     AI_QUERY_TIMEOUT_SECONDS,
+    ATTR_LANGUAGE,
+    ATTR_LANGUAGE_OVERRIDE,
     ATTR_MAX_CHARS,
     ATTR_PROMPT,
     ATTR_SESSION_ID,
@@ -61,6 +63,7 @@ from .helpers import (
     coerce_int,
     is_empty_section,
     pick_weighted_choice,
+    resolve_station_language,
     slugify,
     track_songinfo,
     utc_now_iso,
@@ -756,10 +759,20 @@ class AIRadioRuntimeMixin:
         for item in sections:
             sections_by_index[item.insert_at_index].append(item)
         station_id = str(station.get("id") or "")
+        language, language_override = resolve_station_language(station, self.mass.metadata)
         items: list[QueueItem] = []
         for index in range(len(tracks) + 1):
             for section in sorted(sections_by_index.get(index, []), key=lambda item: item.order):
-                items.append(self._section_to_clip_item(queue_id, session, station_id, section))
+                items.append(
+                    self._section_to_clip_item(
+                        queue_id,
+                        session,
+                        station_id,
+                        language,
+                        language_override,
+                        section,
+                    )
+                )
             if index < len(tracks) and (media_item := tracks[index].get("media_item")) is not None:
                 items.append(build_queue_item(queue_id, media_item))
         return items
@@ -769,6 +782,8 @@ class AIRadioRuntimeMixin:
         queue_id: str,
         session: SessionState,
         station_id: str,
+        language: str,
+        language_override: bool,
         section: PlannedSection,
     ) -> QueueItem:
         """Build the queue item for a not-yet-rendered clip."""
@@ -800,6 +815,8 @@ class AIRadioRuntimeMixin:
             {
                 ATTR_SESSION_ID: session.session_id,
                 ATTR_STATION_ID: station_id,
+                ATTR_LANGUAGE: language,
+                ATTR_LANGUAGE_OVERRIDE: language_override,
                 ATTR_PROMPT: section.prompt,
                 ATTR_MAX_CHARS: section.max_chars,
                 ATTR_WEB_SEARCH_MODE: section.web_search_mode,
@@ -1134,7 +1151,13 @@ class AIRadioRuntimeMixin:
             )
         return mode
 
-    async def _generate_text(self, station: dict[str, Any], prompt: str, web_mode: str) -> str:
+    async def _generate_text(
+        self,
+        station: dict[str, Any],
+        prompt: str,
+        web_mode: str,
+        language_override: bool | None = None,
+    ) -> str:
         """Generate one section text using the configured AI engine."""
         general = cast("dict[str, Any]", station.get("general", {}))
         instructions = str(general.get("instructions") or DEFAULT_LLM_INSTRUCTIONS).strip()
@@ -1142,11 +1165,16 @@ class AIRadioRuntimeMixin:
         if instructions:
             query_parts.append(f"Program instructions:\n{instructions}")
         query_parts.append(f"Pronunciation rules:\n{TTS_PRONUNCIATION_INSTRUCTIONS}")
-        # stated as a default so a station can still ask for another language in its instructions
-        query_parts.append(
-            "Unless the program instructions ask for another language, write the output "
-            f"in the language matching the locale '{self.mass.metadata.locale}'."
-        )
+        language, station_language_override = resolve_station_language(station, self.mass.metadata)
+        if language_override is None:
+            language_override = station_language_override
+        if language_override:
+            query_parts.append(f"Write the output in the language '{language}'.")
+        else:
+            query_parts.append(
+                "Unless the program instructions ask for another language, write the output "
+                f"in the language '{language}'."
+            )
         if web_mode == "force":
             query_parts.append(
                 "Web mode: force. Use current up-to-date information where relevant."
