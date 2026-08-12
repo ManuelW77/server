@@ -103,6 +103,8 @@ class SqueezelitePlayerProvider(PlayerProvider):
             # ports were validated during setup, so a failure here is unlikely
             self.unload_with_error(err)
             return
+        if not self.config.get_value(CONF_DISCOVERY):
+            self._stop_discovery_broadcaster()
         self.mass.streams.register_dynamic_route(
             "/slimproto/multi", self._serve_multi_client_stream
         )
@@ -127,6 +129,18 @@ class SqueezelitePlayerProvider(PlayerProvider):
             slimplayer.player_id, CONF_SYNC_ADJUST, 0
         )
         return int(slimplayer.elapsed_milliseconds - sync_delay)
+
+    def _stop_discovery_broadcaster(self) -> None:
+        """Shut down the slimproto discovery broadcaster started by aioslimproto."""
+        # aioslimproto unconditionally starts its discovery broadcaster in SlimServer.start(),
+        # so the only way to honor the discovery config option is to close the transport
+        # again right after. This can be simplified once aioslimproto grows an option to
+        # not start discovery at all.
+        if self.slimproto is None or self.slimproto._discovery is None:
+            return
+        self.logger.debug("Discovery is disabled, stopping the discovery broadcaster")
+        self.slimproto._discovery.close()
+        self.slimproto._discovery = None
 
     async def _validate_all_ports(
         self, control_port: int, telnet_port: int | None, json_port: int | None
