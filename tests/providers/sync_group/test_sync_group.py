@@ -10,9 +10,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from music_assistant_models.enums import PlaybackState, PlayerFeature, PlayerType
+from music_assistant_models.errors import PlayerCommandFailed
 from music_assistant_models.player import OutputProtocol
 
-from music_assistant.constants import CONF_GROUP_MEMBERS, CONF_PLAYERS, PROTOCOL_PRIORITY
+from music_assistant.constants import (
+    CONF_GROUP_MEMBERS,
+    CONF_PLAYERS,
+    NON_AUDIO_PLAYER_TYPES,
+    PROTOCOL_PRIORITY,
+)
 from music_assistant.providers.sync_group.player import SyncGroupPlayer
 
 
@@ -72,7 +78,9 @@ def _make_mock_player(
     :param offline_protocol_domains: Domains from ``protocol_domains`` whose protocol
         player is currently unreachable.
     :param player_type: Use ``PlayerType.PROTOCOL`` for a protocol endpoint
-        without independent device control (e.g. a generic AirPlay speaker).
+        without independent device control (e.g. a generic AirPlay speaker), or one of
+        ``NON_AUDIO_PLAYER_TYPES`` for an endpoint that only rides along in a group
+        (e.g. a Hue entertainment area).
     """
     player = MagicMock()
     player.player_id = player_id
@@ -81,9 +89,15 @@ def _make_mock_player(
     player.active_output_protocol = active_output_protocol
     player.playback_state = playback_state
     player.protocol_parent_id = None
+    player.type = player_type
     player.provider = MagicMock()
     player.provider.domain = provider_domain
-    supported_features = {PlayerFeature.PLAY_MEDIA, PlayerFeature.SET_MEMBERS}
+    # non-audio players (visualizer/light/display) have no playback of their own
+    supported_features = (
+        {PlayerFeature.SET_MEMBERS}
+        if player_type in NON_AUDIO_PLAYER_TYPES
+        else {PlayerFeature.PLAY_MEDIA, PlayerFeature.SET_MEMBERS}
+    )
     player.supported_features = supported_features
 
     # mirrors Player.is_native_player: protocol endpoints and wrappers have no
@@ -132,6 +146,13 @@ def _make_mock_player(
     # mirrors Player.playback_domains: derived from the live view, never the
     # stale link-time flags
     player.playback_domains = {output.protocol_domain for output in outputs if output.available}
+
+    # mirrors Player.can_play_media: native playback, or a linked protocol to play on.
+    # The self-referential output of a protocol endpoint does not count - it is not a
+    # linked protocol, so there is nothing to hand the stream to.
+    player.can_play_media = PlayerFeature.PLAY_MEDIA in supported_features or any(
+        proto.protocol_domain not in offline for proto in protocols
+    )
 
     # State mock
     # real lists, so a test that needs members has to say so instead of silently
@@ -249,6 +270,67 @@ class TestProtocolAwareLeaderSelection:
 
         leader = sgp._select_sync_leader()
         assert leader == player_a
+
+    def test_select_leader_skips_non_audio_member(self) -> None:
+        """A member without audio output of its own is never elected leader."""
+        mass = _make_mock_mass()
+        sgp = _make_sync_group(mass)
+
+        # a Hue entertainment area: a sendspin client that only visualizes the audio
+        hue_light = _make_mock_player(
+            "hue-131e0665769540ce", provider_domain="sendspin", player_type=PlayerType.LIGHT
+        )
+        # a HomePod with sendspin support enabled
+        homepod = _make_mock_player(
+            "ap3a7981556aad", provider_domain="airplay", protocol_domains=["sendspin"]
+        )
+        mass.players.get_player = _player_lookup(
+            {"hue-131e0665769540ce": hue_light, "ap3a7981556aad": homepod}
+        )
+
+        # the light is listed first, so first-available would have picked it
+        sgp._attr_group_members = ["hue-131e0665769540ce", "ap3a7981556aad"]
+
+        assert sgp._select_sync_leader() == homepod
+        # not even when it takes part in the live session or speaks the active protocol
+        assert (
+            sgp._select_sync_leader(
+                preferred_protocol_domain="sendspin",
+                preferred_member_ids=["hue-131e0665769540ce"],
+            )
+            == homepod
+        )
+
+    def test_select_leader_none_when_only_non_audio_members(self) -> None:
+        """A group of only non-audio members has no player to lead it."""
+        mass = _make_mock_mass()
+        sgp = _make_sync_group(mass)
+
+        hue_light = _make_mock_player(
+            "hue-131e0665769540ce", provider_domain="sendspin", player_type=PlayerType.LIGHT
+        )
+        mass.players.get_player = _player_lookup({"hue-131e0665769540ce": hue_light})
+
+        sgp._attr_group_members = ["hue-131e0665769540ce"]
+
+        assert sgp._select_sync_leader() is None
+
+    @pytest.mark.asyncio
+    async def test_play_media_without_audio_member_reports_reason(self) -> None:
+        """Playing to a group that only holds non-audio members explains why it can't."""
+        mass = _make_mock_mass()
+        sgp = _make_sync_group(mass)
+
+        hue_light = _make_mock_player(
+            "hue-131e0665769540ce", provider_domain="sendspin", player_type=PlayerType.LIGHT
+        )
+        mass.players.get_player = _player_lookup({"hue-131e0665769540ce": hue_light})
+
+        sgp._attr_group_members = ["hue-131e0665769540ce"]
+
+        with pytest.raises(PlayerCommandFailed, match="can play audio"):
+            await sgp.play_media(MagicMock())
+        mass.players._handle_play_media.assert_not_called()
 
 
 class TestMemberSupportsProtocol:

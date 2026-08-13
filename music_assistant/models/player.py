@@ -550,6 +550,27 @@ class Player(ABC):
 
     @property
     @final
+    def can_play_media(self) -> bool:
+        """
+        Return if this player can be handed media to play.
+
+        True for players that play natively as well as for players that can only be
+        reached through a linked output protocol. False for players that have no audio
+        output of their own - a Hue entertainment area registered as a Sendspin
+        visualizer client, for example. Such players can only ride along in a group
+        (to receive the group's audio feed) and must never be picked as a playback
+        target: doing so ends in "no available output protocols" at play time.
+        """
+        if PlayerFeature.PLAY_MEDIA in self.supported_features:
+            return True
+        return any(
+            (protocol_player := self.mass.players.get_player(linked.output_protocol_id)) is not None
+            and protocol_player.available_for_playback
+            for linked in self.linked_output_protocols
+        )
+
+    @property
+    @final
     def implements_setup_flow(self) -> bool:
         """Return if this player implements its own interactive setup flow."""
         return type(self).run_setup_flow is not Player.run_setup_flow

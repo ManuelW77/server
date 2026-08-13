@@ -14,6 +14,7 @@ from music_assistant_models.enums import (
     PlayerFeature,
     PlayerType,
 )
+from music_assistant_models.errors import PlayerCommandFailed
 from music_assistant_models.player import OutputProtocol, PlayerMedia
 
 from music_assistant.constants import (
@@ -1379,6 +1380,59 @@ class TestSelectBestOutputProtocol:
             if protocol.output_protocol_id == "airplay_AABBCCDDEEFF"
         )
         assert airplay_output.available is False
+
+    def test_non_audio_player_reports_why_it_cannot_play(self, mock_mass: MagicMock) -> None:
+        """A visualizer/light endpoint explains that it can only play as part of a group."""
+        controller = PlayerController(mock_mass)
+        mock_mass.players = controller
+
+        sendspin_provider = MockProvider("sendspin", instance_id="sendspin", mass=mock_mass)
+        # a Hue entertainment area: registered as a sendspin client that only
+        # visualizes the group's audio, so it has no output to play media on
+        hue_light = MockPlayer(
+            sendspin_provider,
+            "hue-131e0665769540ce",
+            "Hue: Living, dining and kitchen",
+            player_type=PlayerType.LIGHT,
+        )
+        hue_light._attr_supported_features = {PlayerFeature.SET_MEMBERS}
+        hue_light._cache.clear()
+        hue_light.update_state(signal_event=False)
+
+        controller._players = {"hue-131e0665769540ce": hue_light}
+
+        with pytest.raises(PlayerCommandFailed, match="no audio output of its own"):
+            controller._select_best_output_protocol(hue_light)
+
+    def test_non_audio_player_can_play_media_is_false(self, mock_mass: MagicMock) -> None:
+        """A visualizer/light endpoint never reports itself as a playback target."""
+        controller = PlayerController(mock_mass)
+        mock_mass.players = controller
+
+        sendspin_provider = MockProvider("sendspin", instance_id="sendspin", mass=mock_mass)
+        hue_light = MockPlayer(
+            sendspin_provider,
+            "hue-131e0665769540ce",
+            "Hue: Living, dining and kitchen",
+            player_type=PlayerType.LIGHT,
+        )
+        hue_light._attr_supported_features = {PlayerFeature.SET_MEMBERS}
+        hue_light._cache.clear()
+        hue_light.update_state(signal_event=False)
+
+        sonos_provider = MockProvider("sonos", instance_id="sonos", mass=mock_mass)
+        speaker = MockPlayer(sonos_provider, "sonos_123", "Kantoor")
+        speaker._attr_supported_features.add(PlayerFeature.PLAY_MEDIA)
+        speaker._cache.clear()
+        speaker.update_state(signal_event=False)
+
+        controller._players = {"hue-131e0665769540ce": hue_light, "sonos_123": speaker}
+
+        # the self-referential sendspin output does not make it playable: it is not a
+        # linked protocol, so there is nothing to hand the stream to
+        assert "sendspin" in hue_light.playback_domains
+        assert hue_light.can_play_media is False
+        assert speaker.can_play_media is True
 
 
 class TestPlayerGrouping:

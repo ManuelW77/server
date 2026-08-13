@@ -30,6 +30,7 @@ from music_assistant.constants import (
     CONF_POWER_CONTROL,
     DEFAULT_STREAM_HEADERS,
     DLNA_CONTENT_FEATURES_REALTIME,
+    NON_AUDIO_PLAYER_TYPES,
 )
 from music_assistant.controllers.streams.audio_processing import get_media_session_id
 from music_assistant.helpers.audio import get_mime_type
@@ -203,7 +204,9 @@ class UniversalGroupPlayer(Player):
                 options=[
                     ConfigValueOption(x.player_id, title=x.display_name)
                     for x in self.mass.players.all_players(True, False)
-                    if x.type != PlayerType.GROUP
+                    # a universal group serves each member its own http stream, so a
+                    # player without audio output of its own can never take part
+                    if x.type != PlayerType.GROUP and x.type not in NON_AUDIO_PLAYER_TYPES
                 ],
             ),
             ConfigEntry(

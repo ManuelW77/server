@@ -39,6 +39,7 @@ from music_assistant.constants import (
     CONF_PROTOCOL_PARENT_ID,
     CONF_REPORTED_MAC,
     CONF_UNDERLYING_PLAYER_ID,
+    NON_AUDIO_PLAYER_TYPES,
     PROTOCOL_PRIORITY,
     VERBOSE_LOG_LEVEL,
 )
@@ -1814,6 +1815,13 @@ class ProtocolLinkingMixin:
                     )
                     return protocol_player, linked
 
+        if player.state.type in NON_AUDIO_PLAYER_TYPES:
+            # a visualizer/display/light endpoint never plays audio by itself; it only
+            # rides along in a group to receive that group's audio feed
+            raise PlayerCommandFailed(
+                f"Player {player.state.name} has no audio output of its own and "
+                "can only be used as part of a group"
+            )
         raise PlayerCommandFailed(f"Player {player.state.name} has no available output protocols")
 
     def _get_control_target(

@@ -80,6 +80,11 @@ The Hue REST API, DTLS streamer, `EntertainmentSession` and data models
 5. Click Save — the entertainment area(s) appear as Light players
 6. Join a Hue light player to any playing group — the lights start reacting to music
 
+A Hue light player is never a playback target of its own: it has no audio output, so it
+only receives the audio feed of a group it belongs to. In a sync group it therefore always
+rides along and one of the speakers leads. It needs the group's audio to reach it over
+Sendspin, so the group has to have at least one Sendspin-capable speaker in it.
+
 ## Status
 
 Working and tested on Hue Bridge V2 and Hue Bridge Pro. The current implementation provides a solid foundation with four effect modes and bass-driven beat detection. There is room for future improvements:

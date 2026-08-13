@@ -19,6 +19,7 @@ from music_assistant_models.enums import (
     CrossfadeMode,
     MediaType,
     PlayerFeature,
+    PlayerType,
 )
 from music_assistant_models.media_items import (
     Audiobook,
@@ -991,6 +992,17 @@ PROTOCOL_PRIORITY: Final[dict[str, int]] = {
     "sendspin": 40,
     "dlna": 50,
 }
+
+# Player types that never render audio themselves. They exist to ride along in a
+# group (receiving the group's audio feed to visualize it or show its metadata),
+# so they can not be a playback target or a sync leader.
+NON_AUDIO_PLAYER_TYPES: Final[frozenset[PlayerType]] = frozenset(
+    {
+        PlayerType.DISPLAY,
+        PlayerType.LIGHT,
+        PlayerType.VISUALIZER,
+    }
+)
 
 PROTOCOL_FEATURES: Final[set[PlayerFeature]] = {
     # Player features that may be copied from (inactive) protocol implementations

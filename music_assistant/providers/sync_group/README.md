@@ -75,6 +75,8 @@ The sync group doesn't directly play audio. Instead, it delegates to a **sync le
 
 The sync leader is selected when the group is powered on (which forms the group). Selection is also re-evaluated when the current leader is removed from the group or becomes unavailable.
 
+Only members that can actually be handed the stream are candidates: the leader is the player that receives `play_media`. A member without audio output of its own — a Hue entertainment area, for example, which is a Sendspin visualizer client — stays a regular member and rides along on the leader's protocol session.
+
 1. **Keep current leader**: If a leader exists and is still available, keep it
 2. **Prefer session continuity**: When re-selecting after a leader change while playing, prefer a member that the live session already feeds, since only such a member can inherit the session without a teardown
 3. **Prefer protocol continuity**: Otherwise prefer a member that supports the currently active output protocol, so the group at least stays on that protocol

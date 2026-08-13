@@ -425,6 +425,13 @@ class SyncGroupPlayer(Player):
             # (see play()) so a concurrent (un)group command can't race the start.
             async with self._await_leader_playback():
                 await self.mass.players._handle_play_media(sync_leader.player_id, media)
+        elif self._attr_group_members:
+            # members, but not one of them can be handed the stream (e.g. a group that
+            # only holds visualizer/light players, or every audio member went offline)
+            raise PlayerCommandFailed(
+                f"None of the members of {self.display_name} can play audio, "
+                "consider adding a speaker to the group"
+            )
         else:
             raise RuntimeError("An empty group cannot play media, consider adding members first")
 
@@ -818,11 +825,15 @@ class SyncGroupPlayer(Player):
             return self.sync_leader
         # with selecting a new leader, we prioritize the static group members
         group_members = self.static_group_members or self.group_members or new_members or []
+        # Members without audio output of their own (e.g. a Hue entertainment area that
+        # only visualizes the group's audio) can never lead: the leader receives the
+        # play_media command. They still join the group as a regular member.
         candidates = [
             member_player
             for member_id in group_members
             if (member_player := self.mass.players.get_player(member_id))
             and member_player.state.available
+            and member_player.can_play_media
         ]
         preferred_ids = set(preferred_member_ids or ())
         # preference tiers, most specific first: a member that is already fed by the
