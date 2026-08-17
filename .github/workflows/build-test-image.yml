@@ -62,15 +62,38 @@ jobs:
           pnpm build
 
       - name: Build frontend wheel
+        id: frontend_wheel
         working-directory: frontend-src
         run: |
+          set -euo pipefail
           python3 -m pip install build
           python3 -m build
+
+          frontend_wheel=$(basename dist/music_assistant_frontend-*-py3-none-any.whl)
+          frontend_version=$(echo "$frontend_wheel" | sed -E 's/^music_assistant_frontend-(.+)-py3-none-any\.whl$/\1/')
+
+          echo "frontend_wheel=${frontend_wheel}" >> "$GITHUB_OUTPUT"
+          echo "frontend_version=${frontend_version}" >> "$GITHUB_OUTPUT"
+          echo "Frontend wheel: ${frontend_wheel}"
+          echo "Frontend version: ${frontend_version}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version-file: ".python-version"
+
+      - name: Pin server dependency to the local frontend build
+        env:
+          FRONTEND_VERSION: ${{ steps.frontend_wheel.outputs.frontend_version }}
+        run: |
+          set -euo pipefail
+          # The server wheel's own metadata pins music-assistant-frontend to an exact PyPI
+          # version. If that pin doesn't match what we just built, the Dockerfile's second
+          # `uv pip install music-assistant@...` step (which resolves that pin) silently
+          # uninstalls our local frontend wheel and re-downloads the official PyPI release
+          # instead, discarding all our frontend changes without any build error.
+          sed -E -i "s|^([[:space:]]*)\"music-assistant-frontend==[^\"]*\",|\1\"music-assistant-frontend==${FRONTEND_VERSION}\",|" pyproject.toml
+          grep "music-assistant-frontend==" pyproject.toml
 
       - name: Build server wheel
         run: |
@@ -79,22 +102,23 @@ jobs:
 
       - name: Assemble build context
         id: assemble
+        env:
+          FRONTEND_WHEEL: ${{ steps.frontend_wheel.outputs.frontend_wheel }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp frontend-src/dist/*.whl dist/
+          cp "frontend-src/dist/${FRONTEND_WHEEL}" dist/
 
           server_wheel=$(basename dist/music_assistant-*-py3-none-any.whl)
-          frontend_wheel=$(basename dist/music_assistant_frontend-*-py3-none-any.whl)
           mass_version=$(echo "$server_wheel" | sed -E 's/^music_assistant-(.+)-py3-none-any\.whl$/\1/')
 
           # Point requirements_all.txt at the freshly built local frontend wheel instead of
           # the pinned PyPI release. Runner-local edit only, never committed.
-          sed -E -i "s|^music-assistant-frontend==.*|./dist/${frontend_wheel}|" requirements_all.txt
+          sed -E -i "s|^music-assistant-frontend==.*|./dist/${FRONTEND_WHEEL}|" requirements_all.txt
 
           echo "mass_version=${mass_version}" >> "$GITHUB_OUTPUT"
           echo "Server wheel: ${server_wheel}"
-          echo "Frontend wheel: ${frontend_wheel}"
+          echo "Frontend wheel: ${FRONTEND_WHEEL}"
           echo "MASS_VERSION: ${mass_version}"
 
       - name: Compute lowercase image owner
