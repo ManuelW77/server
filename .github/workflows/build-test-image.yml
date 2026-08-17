@@ -97,6 +97,10 @@ jobs:
           echo "Frontend wheel: ${frontend_wheel}"
           echo "MASS_VERSION: ${mass_version}"
 
+      - name: Compute lowercase image owner
+        id: owner
+        run: echo "lower=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -117,11 +121,11 @@ jobs:
           build-args: |
             MASS_VERSION=${{ steps.assemble.outputs.mass_version }}
             BASE_IMAGE_VERSION=${{ env.BASE_IMAGE_VERSION }}
-          tags: ghcr.io/${{ github.repository_owner }}/server:${{ inputs.tag }}
+          tags: ghcr.io/${{ steps.owner.outputs.lower }}/server:${{ inputs.tag }}
 
       - name: Summary
         env:
-          IMAGE_REF: ghcr.io/${{ github.repository_owner }}/server:${{ inputs.tag }}
+          IMAGE_REF: ghcr.io/${{ steps.owner.outputs.lower }}/server:${{ inputs.tag }}
           SERVER_REF: ${{ inputs.server_ref }}
           FRONTEND_REF: ${{ inputs.frontend_ref }}
           MASS_VERSION: ${{ steps.assemble.outputs.mass_version }}
