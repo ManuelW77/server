@@ -1,0 +1,139 @@
+name: Build Test Image
+
+# Fork-only helper workflow: builds a combined server+frontend Docker test image from
+# arbitrary branches and pushes it to this fork's GHCR namespace. Not part of the
+# upstream project; never intended to be merged into music-assistant/server.
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_ref:
+        description: "Server branch/ref to build"
+        required: true
+        default: "feat/library-automations-plugin"
+      frontend_ref:
+        description: "Frontend branch/ref to build (music-assistant frontend fork)"
+        required: true
+        default: "feat/library-automations-ui"
+      tag:
+        description: "Image tag"
+        required: true
+        default: "test"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  BASE_IMAGE_VERSION: "1.6.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out server
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.server_ref }}
+
+      - name: Check out frontend
+        uses: actions/checkout@v4
+        with:
+          repository: ManuelW77/frontend
+          ref: ${{ inputs.frontend_ref }}
+          path: frontend-src
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.8.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: pnpm
+          cache-dependency-path: frontend-src/pnpm-lock.yaml
+
+      - name: Build frontend
+        working-directory: frontend-src
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Build frontend wheel
+        working-directory: frontend-src
+        run: |
+          python3 -m pip install build
+          python3 -m build
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Build server wheel
+        run: |
+          python3 -m pip install build
+          python3 -m build
+
+      - name: Assemble build context
+        id: assemble
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp frontend-src/dist/*.whl dist/
+
+          server_wheel=$(basename dist/music_assistant-*-py3-none-any.whl)
+          frontend_wheel=$(basename dist/music_assistant_frontend-*-py3-none-any.whl)
+          mass_version=$(echo "$server_wheel" | sed -E 's/^music_assistant-(.+)-py3-none-any\.whl$/\1/')
+
+          # Point requirements_all.txt at the freshly built local frontend wheel instead of
+          # the pinned PyPI release. Runner-local edit only, never committed.
+          sed -E -i "s|^music-assistant-frontend==.*|./dist/${frontend_wheel}|" requirements_all.txt
+
+          echo "mass_version=${mass_version}" >> "$GITHUB_OUTPUT"
+          echo "Server wheel: ${server_wheel}"
+          echo "Frontend wheel: ${frontend_wheel}"
+          echo "MASS_VERSION: ${mass_version}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            MASS_VERSION=${{ steps.assemble.outputs.mass_version }}
+            BASE_IMAGE_VERSION=${{ env.BASE_IMAGE_VERSION }}
+          tags: ghcr.io/${{ github.repository_owner }}/server:${{ inputs.tag }}
+
+      - name: Summary
+        env:
+          IMAGE_REF: ghcr.io/${{ github.repository_owner }}/server:${{ inputs.tag }}
+          SERVER_REF: ${{ inputs.server_ref }}
+          FRONTEND_REF: ${{ inputs.frontend_ref }}
+          MASS_VERSION: ${{ steps.assemble.outputs.mass_version }}
+        run: |
+          {
+            echo "### Test image built"
+            echo ""
+            echo "\`\`\`"
+            echo "docker pull $IMAGE_REF"
+            echo "\`\`\`"
+            echo ""
+            echo "- server ref: \`$SERVER_REF\`"
+            echo "- frontend ref: \`$FRONTEND_REF\`"
+            echo "- MASS_VERSION: \`$MASS_VERSION\`"
+          } >> "$GITHUB_STEP_SUMMARY"
