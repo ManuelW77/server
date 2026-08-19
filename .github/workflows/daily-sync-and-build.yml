@@ -36,7 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch upstream dev
-          git checkout dev
+          git checkout -B dev origin/dev
           git merge --ff-only upstream/dev
           git push origin dev
 
@@ -71,7 +71,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch upstream main
-          git checkout main
+          git checkout -B main origin/main
           git merge --ff-only upstream/main
           git push origin main
 
