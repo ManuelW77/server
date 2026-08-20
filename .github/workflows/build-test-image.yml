@@ -95,6 +95,18 @@ jobs:
           sed -E -i "s|^([[:space:]]*)\"music-assistant-frontend==[^\"]*\",|\1\"music-assistant-frontend==${FRONTEND_VERSION}\",|" pyproject.toml
           grep "music-assistant-frontend==" pyproject.toml
 
+      - name: Stamp server version from upstream's latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # pyproject.toml pins version = "0.0.0" on dev (upstream's own release workflow
+          # rewrites it at release time); take the latest upstream release tag instead so
+          # the test image doesn't report a meaningless 0.0.0.
+          upstream_version=$(gh release list -R music-assistant/server -L 1 --json tagName -q '.[0].tagName')
+          sed -E -i "s|^version = \"0\.0\.0\"|version = \"${upstream_version}\"|" pyproject.toml
+          grep '^version = ' pyproject.toml
+
       - name: Build server wheel
         run: |
           python3 -m pip install build
