@@ -7,7 +7,9 @@ name: Daily Sync and Build
 
 on:
   schedule:
-    - cron: "0 6 * * *"
+    # 06:00 Europe/Berlin (CEST, UTC+2). GitHub Actions cron is UTC-only and
+    # doesn't follow DST, so this drifts to 07:00 local once CET (UTC+1) starts.
+    - cron: "0 4 * * *"
   workflow_dispatch: {}
 
 permissions:
